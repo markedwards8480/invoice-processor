@@ -4,6 +4,7 @@ const fetch = require('node-fetch');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
+// Invoice processor backend
 
 // Enable CORS for all origins (you can restrict this in production)
 app.use(cors());
