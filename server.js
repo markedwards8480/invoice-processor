@@ -20,11 +20,14 @@ app.get('/health', (req, res) => {
 app.post('/api/zoho/vendor', async (req, res) => {
   try {
     const { vendorName, organizationId, accessToken, apiDomain } = req.body;
+    
+    // Normalize vendor name to uppercase to match Zoho Books convention
+    const normalizedVendorName = vendorName.toUpperCase();
 
-    console.log('Searching for vendor:', vendorName);
+    console.log('Searching for vendor:', normalizedVendorName);
 
     // Search for existing vendor
-    const searchUrl = `${apiDomain}/books/v3/contacts?organization_id=${organizationId}&contact_name=${encodeURIComponent(vendorName)}`;
+    const searchUrl = `${apiDomain}/books/v3/contacts?organization_id=${organizationId}&contact_name=${encodeURIComponent(normalizedVendorName)}`;
     const searchResponse = await fetch(searchUrl, {
       headers: {
         'Authorization': `Zoho-oauthtoken ${accessToken}`
@@ -44,7 +47,7 @@ app.post('/api/zoho/vendor', async (req, res) => {
     }
 
     // Vendor doesn't exist, create new one
-    console.log('Creating new vendor:', vendorName);
+    console.log('Creating new vendor:', normalizedVendorName);
     
     const createUrl = `${apiDomain}/books/v3/contacts?organization_id=${organizationId}`;
     const createResponse = await fetch(createUrl, {
@@ -54,7 +57,7 @@ app.post('/api/zoho/vendor', async (req, res) => {
         'Content-Type': 'application/json'
       },
       body: JSON.stringify({
-        contact_name: vendorName,
+        contact_name: normalizedVendorName,
         contact_type: 'vendor'
       })
     });
