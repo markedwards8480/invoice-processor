@@ -123,7 +123,11 @@ app.post('/api/claude/extract', async (req, res) => {
 
     const response = await fetch("https://api.anthropic.com/v1/messages", {
       method: "POST",
-      headers: {
+      headers: {headers: {
+  "Content-Type": "application/json",
+  "x-api-key": process.env.ANTHROPIC_API_KEY || req.headers['x-anthropic-api-key'],
+  "anthropic-version": "2023-06-01"  // ADD THIS LINE
+},
         "Content-Type": "application/json",
         "x-api-key": process.env.ANTHROPIC_API_KEY || req.headers['x-anthropic-api-key']
       },
