@@ -4,7 +4,6 @@ const fetch = require('node-fetch');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
-// Invoice processor backend
 
 // Enable CORS for all origins (you can restrict this in production)
 app.use(cors());
@@ -32,7 +31,7 @@ app.post('/api/zoho/vendor', async (req, res) => {
       }
     });
 
-    if (searchResponse.ok) {
+    if (!searchResponse.ok) {
       const searchData = await searchResponse.json();
       if (searchData.contacts && searchData.contacts.length > 0) {
         // Check if any contact is a vendor
@@ -46,34 +45,34 @@ app.post('/api/zoho/vendor', async (req, res) => {
 
     // Vendor doesn't exist, create new one
     console.log('Creating new vendor:', vendorName);
+    
     const createUrl = `${apiDomain}/books/v3/contacts?organization_id=${organizationId}`;
     const createResponse = await fetch(createUrl, {
       method: 'POST',
       headers: {
         'Authorization': `Zoho-oauthtoken ${accessToken}`,
-        'Content-Type': 'application/x-www-form-urlencoded'
+        'Content-Type': 'application/json'
       },
-      body: `JSONString=${encodeURIComponent(JSON.stringify({
+      body: JSON.stringify({
         contact_name: vendorName,
         contact_type: 'vendor'
-      }))}`
+      })
     });
 
-    const createText = await createResponse.text();
-    console.log('Create vendor response:', createText);
-
-    if (!createResponse.ok) {
-      return res.status(createResponse.status).json({ 
-        error: 'Failed to create vendor',
-        details: createText 
-      });
+    const createData = await createResponse.json();
+    
+    if (createData.contact) {
+      console.log('Created vendor:', createData.contact.contact_id);
+      return res.json({ vendorId: createData.contact.contact_id, created: true });
     }
 
-    const createData = JSON.parse(createText);
-    res.json({ vendorId: createData.contact.contact_id, created: true });
+    return res.status(500).json({ 
+      error: 'Failed to create vendor',
+      details: createData
+    });
 
   } catch (error) {
-    console.error('Vendor error:', error);
+    console.error('Vendor creation error:', error);
     res.status(500).json({ error: error.message });
   }
 });
@@ -84,7 +83,7 @@ app.post('/api/zoho/bill', async (req, res) => {
     const { billData, organizationId, accessToken, apiDomain } = req.body;
 
     console.log('Creating bill in Zoho Books:', billData);
-
+    
     const url = `${apiDomain}/books/v3/bills?organization_id=${organizationId}`;
     const response = await fetch(url, {
       method: 'POST',
@@ -97,11 +96,11 @@ app.post('/api/zoho/bill', async (req, res) => {
 
     const responseText = await response.text();
     console.log('Zoho API Response:', responseText);
-
+    
     if (!response.ok) {
       return res.status(response.status).json({ 
         error: 'Failed to create bill',
-        details: responseText 
+        details: responseText
       });
     }
 
@@ -123,14 +122,11 @@ app.post('/api/claude/extract', async (req, res) => {
 
     const response = await fetch("https://api.anthropic.com/v1/messages", {
       method: "POST",
-      headers: {headers: {
-  "Content-Type": "application/json",
-  "x-api-key": process.env.ANTHROPIC_API_KEY || req.headers['x-anthropic-api-key'],
-  "anthropic-version": "2023-06-01"  // ADD THIS LINE
-},
+      headers: {
         "Content-Type": "application/json",
-        "x-api-key": process.env.ANTHROPIC_API_KEY || req.headers['x-anthropic-api-key']
-      "anthropic-version": "2023-06-01",
+        "x-api-key": process.env.ANTHROPIC_API_KEY || req.headers['x-anthropic-api-key'],
+        "anthropic-version": "2023-06-01"
+      },
       body: JSON.stringify({
         model: "claude-sonnet-4-20250514",
         max_tokens: 1000,
@@ -183,24 +179,37 @@ If any field is not found, use null. Return only the JSON object.`
       const errorText = await response.text();
       console.error('Claude API error:', errorText);
       return res.status(response.status).json({ 
-        error: 'Failed to extract data',
-        details: errorText 
+        error: 'Failed to extract invoice data',
+        details: errorText
       });
     }
 
     const data = await response.json();
-    const textContent = data.content
-      .filter(item => item.type === "text")
-      .map(item => item.text)
-      .join("");
+    
+    // Extract the text content from Claude's response
+    const textContent = data.content.find(item => item.type === 'text');
+    if (!textContent) {
+      return res.status(500).json({ error: 'No text response from Claude' });
+    }
 
-    const cleanText = textContent.replace(/```json|```/g, "").trim();
-    const extractedData = JSON.parse(cleanText);
+    // Parse the JSON from Claude's response
+    let extractedData;
+    try {
+      // Remove any markdown code blocks if present
+      const cleanText = textContent.text.replace(/```json\n?|\n?```/g, '').trim();
+      extractedData = JSON.parse(cleanText);
+    } catch (parseError) {
+      console.error('Failed to parse Claude response:', textContent.text);
+      return res.status(500).json({ 
+        error: 'Failed to parse extracted data',
+        details: textContent.text
+      });
+    }
 
     res.json(extractedData);
 
   } catch (error) {
-    console.error('Extraction error:', error);
+    console.error('Invoice extraction error:', error);
     res.status(500).json({ error: error.message });
   }
 });
