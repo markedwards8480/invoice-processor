@@ -31,7 +31,7 @@ app.post('/api/zoho/vendor', async (req, res) => {
       }
     });
 
-    if (!searchResponse.ok) {
+    if (searchResponse.ok) {
       const searchData = await searchResponse.json();
       if (searchData.contacts && searchData.contacts.length > 0) {
         // Check if any contact is a vendor
