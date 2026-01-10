@@ -16,38 +16,109 @@ app.get('/health', (req, res) => {
   res.json({ status: 'ok' });
 });
 
+// Helper function to normalize vendor names for comparison
+function normalizeVendorName(name) {
+  return name
+    .toUpperCase()
+    .replace(/[^\w\s]/g, '') // Remove punctuation
+    .replace(/\s+/g, ' ')    // Normalize spaces
+    .trim();
+}
+
+// Helper function to calculate similarity between two strings
+function calculateSimilarity(str1, str2) {
+  const normalized1 = normalizeVendorName(str1);
+  const normalized2 = normalizeVendorName(str2);
+  
+  // Exact match
+  if (normalized1 === normalized2) return 1.0;
+  
+  // Check if one contains the other
+  if (normalized1.includes(normalized2) || normalized2.includes(normalized1)) {
+    return 0.8;
+  }
+  
+  return 0;
+}
+
 // Proxy endpoint for Zoho Books API - Search/Create Vendor
 app.post('/api/zoho/vendor', async (req, res) => {
   try {
     const { vendorName, organizationId, accessToken, apiDomain } = req.body;
     
-    // Normalize vendor name to uppercase to match Zoho Books convention
-    const normalizedVendorName = vendorName.toUpperCase();
+    console.log('Searching for vendor:', vendorName);
 
-    console.log('Searching for vendor:', normalizedVendorName);
+    // Try multiple search strategies
+    const searchStrategies = [
+      // Strategy 1: Exact name search
+      `contact_name=${encodeURIComponent(vendorName)}`,
+      // Strategy 2: Uppercase name search
+      `contact_name=${encodeURIComponent(vendorName.toUpperCase())}`,
+      // Strategy 3: Contains search with first few words
+      `contact_name_contains=${encodeURIComponent(vendorName.split(' ').slice(0, 3).join(' '))}`,
+      // Strategy 4: Broad search with just first word (for companies)
+      `contact_name_contains=${encodeURIComponent(vendorName.split(' ')[0])}`
+    ];
 
-    // Search for existing vendor
-    const searchUrl = `${apiDomain}/books/v3/contacts?organization_id=${organizationId}&contact_name=${encodeURIComponent(normalizedVendorName)}`;
-    const searchResponse = await fetch(searchUrl, {
-      headers: {
-        'Authorization': `Zoho-oauthtoken ${accessToken}`
-      }
-    });
+    let allVendors = [];
+    
+    // Try each search strategy
+    for (const searchParam of searchStrategies) {
+      const searchUrl = `${apiDomain}/books/v3/contacts?organization_id=${organizationId}&${searchParam}`;
+      console.log('Trying search:', searchParam);
+      
+      const searchResponse = await fetch(searchUrl, {
+        headers: {
+          'Authorization': `Zoho-oauthtoken ${accessToken}`
+        }
+      });
 
-    if (searchResponse.ok) {
-      const searchData = await searchResponse.json();
-      if (searchData.contacts && searchData.contacts.length > 0) {
-        // Check if any contact is a vendor
-        const vendor = searchData.contacts.find(c => c.contact_type === 'vendor' || c.is_vendor);
-        if (vendor) {
-          console.log('Found existing vendor:', vendor.contact_id);
-          return res.json({ vendorId: vendor.contact_id, created: false });
+      if (searchResponse.ok) {
+        const searchData = await searchResponse.json();
+        if (searchData.contacts && searchData.contacts.length > 0) {
+          // Filter for vendors only
+          const vendors = searchData.contacts.filter(c => c.contact_type === 'vendor' || c.is_vendor);
+          allVendors.push(...vendors);
+          console.log(`Found ${vendors.length} vendors with this strategy`);
         }
       }
     }
 
+    // Remove duplicates by contact_id
+    const uniqueVendors = Array.from(new Map(allVendors.map(v => [v.contact_id, v])).values());
+    console.log(`Total unique vendors found: ${uniqueVendors.length}`);
+
+    // Find best match using similarity scoring
+    if (uniqueVendors.length > 0) {
+      const vendorsWithScores = uniqueVendors.map(vendor => ({
+        ...vendor,
+        similarity: calculateSimilarity(vendorName, vendor.contact_name)
+      }));
+
+      // Sort by similarity score
+      vendorsWithScores.sort((a, b) => b.similarity - a.similarity);
+      
+      console.log('Vendor matches:');
+      vendorsWithScores.forEach(v => {
+        console.log(`  - ${v.contact_name} (score: ${v.similarity})`);
+      });
+
+      // Use vendor if similarity is above threshold
+      const bestMatch = vendorsWithScores[0];
+      if (bestMatch.similarity >= 0.8) {
+        console.log(`Using existing vendor: ${bestMatch.contact_name} (ID: ${bestMatch.contact_id})`);
+        return res.json({ 
+          vendorId: bestMatch.contact_id, 
+          vendorName: bestMatch.contact_name,
+          created: false 
+        });
+      } else {
+        console.log(`Best match score ${bestMatch.similarity} too low, will create new vendor`);
+      }
+    }
+
     // Vendor doesn't exist, create new one
-    console.log('Creating new vendor:', normalizedVendorName);
+    console.log('Creating new vendor:', vendorName);
     
     const createUrl = `${apiDomain}/books/v3/contacts?organization_id=${organizationId}`;
     const createResponse = await fetch(createUrl, {
@@ -57,7 +128,7 @@ app.post('/api/zoho/vendor', async (req, res) => {
         'Content-Type': 'application/json'
       },
       body: JSON.stringify({
-        contact_name: normalizedVendorName,
+        contact_name: vendorName.toUpperCase(), // Store in uppercase to match convention
         contact_type: 'vendor'
       })
     });
@@ -66,7 +137,11 @@ app.post('/api/zoho/vendor', async (req, res) => {
     
     if (createData.contact) {
       console.log('Created vendor:', createData.contact.contact_id);
-      return res.json({ vendorId: createData.contact.contact_id, created: true });
+      return res.json({ 
+        vendorId: createData.contact.contact_id,
+        vendorName: createData.contact.contact_name,
+        created: true 
+      });
     }
 
     return res.status(500).json({ 
@@ -87,6 +162,29 @@ app.post('/api/zoho/bill', async (req, res) => {
 
     console.log('Creating bill in Zoho Books:', billData);
     
+    // First, check if this invoice number already exists for this vendor
+    const checkUrl = `${apiDomain}/books/v3/bills?organization_id=${organizationId}&vendor_id=${billData.vendor_id}&bill_number=${encodeURIComponent(billData.bill_number)}`;
+    console.log('Checking for duplicate invoice:', billData.bill_number);
+    
+    const checkResponse = await fetch(checkUrl, {
+      headers: {
+        'Authorization': `Zoho-oauthtoken ${accessToken}`
+      }
+    });
+
+    if (checkResponse.ok) {
+      const checkData = await checkResponse.json();
+      if (checkData.bills && checkData.bills.length > 0) {
+        console.log('Duplicate invoice found!');
+        return res.status(409).json({ 
+          error: 'Duplicate Invoice',
+          message: `Invoice ${billData.bill_number} already exists for this vendor.`,
+          existingBill: checkData.bills[0]
+        });
+      }
+    }
+    
+    // No duplicate found, proceed with creation
     const url = `${apiDomain}/books/v3/bills?organization_id=${organizationId}`;
     const response = await fetch(url, {
       method: 'POST',
