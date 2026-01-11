@@ -16,6 +16,8 @@ function InvoiceProcessor() {
   const [showSettings, setShowSettings] = useState(false);
   const [currentPreview, setCurrentPreview] = useState(null);
   const [editMode, setEditMode] = useState(false);
+  const [accounts, setAccounts] = useState([]);
+  const [accountMappings, setAccountMappings] = useState({});
 
   // Load config from localStorage
   useEffect(() => {
@@ -28,6 +30,11 @@ function InvoiceProcessor() {
     if (savedLog) {
       setActivityLog(JSON.parse(savedLog));
     }
+    
+    const savedMappings = localStorage.getItem('accountMappings');
+    if (savedMappings) {
+      setAccountMappings(JSON.parse(savedMappings));
+    }
   }, []);
 
   // Save config to localStorage
@@ -35,6 +42,98 @@ function InvoiceProcessor() {
     localStorage.setItem('zohoConfig', JSON.stringify(config));
     setShowSettings(false);
     addToLog('success', 'Settings saved successfully');
+    // Fetch accounts after saving config
+    fetchAccounts();
+  };
+
+  // Fetch Chart of Accounts from Zoho Books
+  const fetchAccounts = async () => {
+    if (!config.organizationId || !config.accessToken) {
+      return;
+    }
+
+    try {
+      addToLog('info', 'Fetching chart of accounts from Zoho Books...');
+      
+      const response = await fetch('/api/zoho/accounts', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          organizationId: config.organizationId,
+          accessToken: config.accessToken,
+          apiDomain: config.apiDomain
+        })
+      });
+
+      if (!response.ok) {
+        throw new Error('Failed to fetch accounts');
+      }
+
+      const data = await response.json();
+      setAccounts(data.accounts || []);
+      addToLog('success', `✓ Loaded ${data.accounts?.length || 0} accounts from Zoho Books`);
+      
+    } catch (error) {
+      addToLog('error', `Failed to load accounts: ${error.message}`);
+    }
+  };
+
+  // Auto-suggest account based on line item description
+  const suggestAccount = (description) => {
+    const desc = description.toLowerCase();
+    
+    // Check saved mappings first
+    for (const [keyword, accountId] of Object.entries(accountMappings)) {
+      if (desc.includes(keyword.toLowerCase())) {
+        return accountId;
+      }
+    }
+    
+    // Default keyword matching
+    const keywords = {
+      'shipping': ['shipping', 'freight', 'delivery', 'ship'],
+      'fee': ['fee', 'charge', 'service'],
+      'minimum': ['minimum', 'min'],
+      'credit card': ['credit card', 'cc', 'payment processing'],
+      'sticker': ['sticker', 'label', 'packaging']
+    };
+    
+    for (const [category, terms] of Object.entries(keywords)) {
+      if (terms.some(term => desc.includes(term))) {
+        // Find matching account
+        const account = accounts.find(a => 
+          a.account_name.toLowerCase().includes(category) ||
+          a.account_name.toLowerCase().includes(terms[0])
+        );
+        if (account) return account.account_id;
+      }
+    }
+    
+    // Return first expense account as fallback
+    const expenseAccount = accounts.find(a => 
+      a.account_type === 'expense' || 
+      a.account_name.toLowerCase().includes('expense')
+    );
+    
+    return expenseAccount?.account_id || '';
+  };
+
+  // Save account mapping for future use
+  const saveAccountMapping = (description, accountId) => {
+    // Extract key terms from description
+    const keywords = description.toLowerCase()
+      .replace(/[^a-z\s]/g, '')
+      .split(' ')
+      .filter(word => word.length > 3);
+    
+    if (keywords.length > 0) {
+      const newMappings = { ...accountMappings };
+      keywords.forEach(keyword => {
+        newMappings[keyword] = accountId;
+      });
+      setAccountMappings(newMappings);
+      localStorage.setItem('accountMappings', JSON.stringify(newMappings));
+    }
   };
 
   // Automatically refresh access token when expired
@@ -154,6 +253,14 @@ function InvoiceProcessor() {
       addToLog('info', `Extracting data from ${fileObj.file.name}...`);
       const extractedData = await extractInvoiceData(fileObj);
       
+      // Auto-suggest accounts for each line item
+      if (extractedData.lineItems && accounts.length > 0) {
+        extractedData.lineItems = extractedData.lineItems.map(item => ({
+          ...item,
+          account_id: item.account_id || suggestAccount(item.description)
+        }));
+      }
+      
       // Update file with extracted data
       const updatedFile = {
         ...fileObj,
@@ -253,6 +360,7 @@ function InvoiceProcessor() {
           description: item.description,
           rate: item.rate,
           quantity: item.quantity,
+          account_id: item.account_id,
           item_order: data.lineItems.indexOf(item)
         })),
         notes: data.notes || ''
@@ -482,12 +590,29 @@ function InvoiceProcessor() {
                 </div>
               </div>
               
-              <button
-                onClick={saveConfig}
-                className="px-6 py-2 bg-emerald-600 text-white rounded-lg hover:bg-emerald-700 transition"
-              >
-                Save Settings
-              </button>
+              <div className="flex gap-3">
+                <button
+                  onClick={saveConfig}
+                  className="flex-1 px-6 py-2 bg-emerald-600 text-white rounded-lg hover:bg-emerald-700 transition"
+                >
+                  Save Settings
+                </button>
+                <button
+                  onClick={fetchAccounts}
+                  className="px-6 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition"
+                  disabled={!config.organizationId || !config.accessToken}
+                >
+                  Load GL Accounts
+                </button>
+              </div>
+              
+              {accounts.length > 0 && (
+                <div className="mt-4 p-3 bg-green-50 border border-green-200 rounded-lg">
+                  <p className="text-sm text-green-800">
+                    ✓ {accounts.length} GL accounts loaded from Zoho Books
+                  </p>
+                </div>
+              )}
             </div>
           </div>
         )}
@@ -712,32 +837,55 @@ function InvoiceProcessor() {
                     <label className="block text-sm font-medium text-gray-700 mb-2">
                       Line Items
                     </label>
-                    <div className="space-y-2">
+                    <div className="space-y-3">
                       {currentPreview.extractedData.lineItems?.map((item, index) => (
-                        <div key={index} className="grid grid-cols-4 gap-2 p-3 bg-gray-50 rounded-lg">
-                          <input
-                            type="text"
-                            value={item.description || ''}
-                            onChange={(e) => updateLineItem(index, 'description', e.target.value)}
-                            className="col-span-2 px-2 py-1 border border-gray-300 rounded text-sm"
-                            placeholder="Description"
-                          />
-                          <input
-                            type="number"
-                            step="0.01"
-                            value={item.quantity || ''}
-                            onChange={(e) => updateLineItem(index, 'quantity', parseFloat(e.target.value))}
-                            className="px-2 py-1 border border-gray-300 rounded text-sm"
-                            placeholder="Qty"
-                          />
-                          <input
-                            type="number"
-                            step="0.01"
-                            value={item.rate || ''}
-                            onChange={(e) => updateLineItem(index, 'rate', parseFloat(e.target.value))}
-                            className="px-2 py-1 border border-gray-300 rounded text-sm"
-                            placeholder="Rate"
-                          />
+                        <div key={index} className="p-3 bg-gray-50 rounded-lg space-y-2">
+                          <div className="grid grid-cols-4 gap-2">
+                            <input
+                              type="text"
+                              value={item.description || ''}
+                              onChange={(e) => updateLineItem(index, 'description', e.target.value)}
+                              className="col-span-2 px-2 py-1 border border-gray-300 rounded text-sm"
+                              placeholder="Description"
+                            />
+                            <input
+                              type="number"
+                              step="0.01"
+                              value={item.quantity || ''}
+                              onChange={(e) => updateLineItem(index, 'quantity', parseFloat(e.target.value))}
+                              className="px-2 py-1 border border-gray-300 rounded text-sm"
+                              placeholder="Qty"
+                            />
+                            <input
+                              type="number"
+                              step="0.01"
+                              value={item.rate || ''}
+                              onChange={(e) => updateLineItem(index, 'rate', parseFloat(e.target.value))}
+                              className="px-2 py-1 border border-gray-300 rounded text-sm"
+                              placeholder="Rate"
+                            />
+                          </div>
+                          <div>
+                            <select
+                              value={item.account_id || ''}
+                              onChange={(e) => {
+                                updateLineItem(index, 'account_id', e.target.value);
+                                if (e.target.value) {
+                                  saveAccountMapping(item.description, e.target.value);
+                                }
+                              }}
+                              className={`w-full px-2 py-1 border rounded text-sm ${
+                                !item.account_id ? 'border-red-300 bg-red-50' : 'border-gray-300'
+                              }`}
+                            >
+                              <option value="">Select GL Account (Required)</option>
+                              {accounts.map(acc => (
+                                <option key={acc.account_id} value={acc.account_id}>
+                                  {acc.account_name} ({acc.account_type})
+                                </option>
+                              ))}
+                            </select>
+                          </div>
                         </div>
                       ))}
                     </div>
