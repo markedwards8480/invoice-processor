@@ -1,9 +1,123 @@
 const express = require('express');
 const cors = require('cors');
 const fetch = require('node-fetch');
+const fs = require('fs').promises;
+const path = require('path');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
+
+// Data directory for persistent storage
+const DATA_DIR = path.join(__dirname, 'data');
+
+// Ensure data directory exists
+async function initializeDataDir() {
+  try {
+    await fs.mkdir(DATA_DIR, { recursive: true });
+    console.log('Data directory initialized:', DATA_DIR);
+  } catch (error) {
+    console.error('Error creating data directory:', error);
+  }
+}
+
+initializeDataDir();
+
+// Helper functions for data persistence
+async function readData(filename, defaultValue = null) {
+  try {
+    const filePath = path.join(DATA_DIR, filename);
+    const data = await fs.readFile(filePath, 'utf8');
+    return JSON.parse(data);
+  } catch (error) {
+    if (error.code === 'ENOENT') {
+      return defaultValue;
+    }
+    throw error;
+  }
+}
+
+async function writeData(filename, data) {
+  const filePath = path.join(DATA_DIR, filename);
+  await fs.writeFile(filePath, JSON.stringify(data, null, 2), 'utf8');
+}
+
+// API endpoint to save configuration
+app.post('/api/config/save', async (req, res) => {
+  try {
+    const config = req.body;
+    await writeData('config.json', config);
+    res.json({ success: true, message: 'Configuration saved' });
+  } catch (error) {
+    console.error('Error saving config:', error);
+    res.status(500).json({ error: 'Failed to save configuration' });
+  }
+});
+
+// API endpoint to load configuration
+app.get('/api/config/load', async (req, res) => {
+  try {
+    const config = await readData('config.json', {
+      apiDomain: 'https://www.zohoapis.com',
+      organizationId: '',
+      accessToken: '',
+      refreshToken: '',
+      clientId: '',
+      clientSecret: ''
+    });
+    res.json(config);
+  } catch (error) {
+    console.error('Error loading config:', error);
+    res.status(500).json({ error: 'Failed to load configuration' });
+  }
+});
+
+// API endpoint to save GL account mappings
+app.post('/api/mappings/save', async (req, res) => {
+  try {
+    const { mappings } = req.body;
+    const existingMappings = await readData('gl_mappings.json', {});
+    const updatedMappings = { ...existingMappings, ...mappings };
+    await writeData('gl_mappings.json', updatedMappings);
+    res.json({ success: true, message: 'Mappings saved' });
+  } catch (error) {
+    console.error('Error saving mappings:', error);
+    res.status(500).json({ error: 'Failed to save mappings' });
+  }
+});
+
+// API endpoint to load GL account mappings
+app.get('/api/mappings/load', async (req, res) => {
+  try {
+    const mappings = await readData('gl_mappings.json', {});
+    res.json({ mappings });
+  } catch (error) {
+    console.error('Error loading mappings:', error);
+    res.status(500).json({ error: 'Failed to load mappings' });
+  }
+});
+
+// API endpoint to cache GL accounts
+app.post('/api/accounts/cache', async (req, res) => {
+  try {
+    const { accounts } = req.body;
+    await writeData('accounts_cache.json', { accounts, cachedAt: new Date().toISOString() });
+    res.json({ success: true, message: 'Accounts cached' });
+  } catch (error) {
+    console.error('Error caching accounts:', error);
+    res.status(500).json({ error: 'Failed to cache accounts' });
+  }
+});
+
+// API endpoint to load cached GL accounts
+app.get('/api/accounts/cache', async (req, res) => {
+  try {
+    const cache = await readData('accounts_cache.json', { accounts: [], cachedAt: null });
+    res.json(cache);
+  } catch (error) {
+    console.error('Error loading cached accounts:', error);
+    res.status(500).json({ error: 'Failed to load cached accounts' });
+  }
+});
 
 // Enable CORS for all origins (you can restrict this in production)
 app.use(cors());
