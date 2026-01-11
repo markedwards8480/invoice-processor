@@ -115,7 +115,7 @@ function InvoiceProcessor() {
       setCurrentPreview(updatedFile);
       setEditMode(true);
       
-      addToLog('success', `Data extracted from ${fileObj.file.name}`, extractedData);
+      addToLog('success', `Data extracted from ${fileObj.file.name}`);
       return updatedFile;
       
     } catch (error) {
@@ -155,15 +155,24 @@ function InvoiceProcessor() {
       });
 
       if (!vendorResponse.ok) {
-        throw new Error('Failed to find/create vendor');
+        const errorData = await vendorResponse.json().catch(() => ({}));
+        
+        // Provide specific error messages
+        if (vendorResponse.status === 401) {
+          throw new Error('Access token expired or invalid. Please generate a new token in Settings.');
+        } else if (vendorResponse.status === 400) {
+          throw new Error('Invalid organization ID or access token. Please check your settings.');
+        } else {
+          throw new Error(errorData.error || errorData.details || 'Failed to find/create vendor. Check your Zoho credentials.');
+        }
       }
 
       const vendorData = await vendorResponse.json();
       
       if (vendorData.created) {
-        addToLog('warning', `Created new vendor: ${vendorData.vendorName}`, { vendorId: vendorData.vendorId });
+        addToLog('warning', `⚠ Created new vendor: ${vendorData.vendorName}`);
       } else {
-        addToLog('success', `Found existing vendor: ${vendorData.vendorName}`, { vendorId: vendorData.vendorId });
+        addToLog('success', `✓ Found existing vendor: ${vendorData.vendorName}`);
       }
 
       // Create Bill
@@ -197,28 +206,28 @@ function InvoiceProcessor() {
       });
 
       if (!billResponse.ok) {
-        const errorData = await billResponse.json();
+        const errorData = await billResponse.json().catch(() => ({}));
         
         // Check if it's a duplicate invoice
         if (billResponse.status === 409) {
-          throw new Error(`Duplicate Invoice: ${errorData.message}`);
+          throw new Error(`Duplicate invoice detected: ${errorData.message || `Invoice ${data.invoiceNumber} already exists for this vendor`}`);
+        } else if (billResponse.status === 401) {
+          throw new Error('Access token expired. Please generate a new token in Settings.');
+        } else if (billResponse.status === 400) {
+          throw new Error(`Invalid bill data: ${errorData.error || errorData.details || 'Please check the invoice details'}`);
+        } else {
+          throw new Error(errorData.error || errorData.details || 'Failed to create bill in Zoho Books');
         }
-        
-        throw new Error(errorData.error || 'Failed to create bill');
       }
 
       const billResult = await billResponse.json();
       
-      addToLog('success', `✓ Invoice ${data.invoiceNumber} uploaded successfully`, {
-        billId: billResult.bill?.bill_id,
-        vendor: data.vendorName,
-        amount: data.total
-      });
+      addToLog('success', `✓ Invoice ${data.invoiceNumber} uploaded successfully! Amount: $${data.total?.toFixed(2) || '0.00'} ${data.currency || 'CAD'}`);
 
       return billResult;
       
     } catch (error) {
-      addToLog('error', `Failed to upload ${data.invoiceNumber}: ${error.message}`);
+      addToLog('error', `✗ Failed to upload ${data.invoiceNumber}: ${error.message}`);
       throw error;
     }
   };
@@ -235,14 +244,15 @@ function InvoiceProcessor() {
         f.id === currentPreview.id ? { ...f, status: 'success' } : f
       ));
       
-      setCurrentPreview(null);
-      setEditMode(false);
     } catch (error) {
       setFiles(prev => prev.map(f => 
         f.id === currentPreview.id ? { ...f, status: 'error', error: error.message } : f
       ));
     } finally {
       setProcessing(false);
+      // Always close modal after upload attempt
+      setCurrentPreview(null);
+      setEditMode(false);
     }
   };
 
