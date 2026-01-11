@@ -333,14 +333,27 @@ function InvoiceProcessor() {
 
   // Update line item
   const updateLineItem = (index, field, value) => {
+    const updatedData = {
+      ...currentPreview.extractedData,
+      lineItems: currentPreview.extractedData.lineItems.map((item, i) => 
+        i === index ? { ...item, [field]: value } : item
+      )
+    };
+    
+    // Recalculate subtotal and total
+    const newSubtotal = updatedData.lineItems.reduce((sum, item) => {
+      const amount = (parseFloat(item.quantity) || 0) * (parseFloat(item.rate) || 0);
+      return sum + amount;
+    }, 0);
+    
+    const newTotal = newSubtotal + (parseFloat(updatedData.tax) || 0);
+    
+    updatedData.subtotal = newSubtotal;
+    updatedData.total = newTotal;
+    
     setCurrentPreview(prev => ({
       ...prev,
-      extractedData: {
-        ...prev.extractedData,
-        lineItems: prev.extractedData.lineItems.map((item, i) => 
-          i === index ? { ...item, [field]: value } : item
-        )
-      }
+      extractedData: updatedData
     }));
   };
 
