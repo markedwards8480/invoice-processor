@@ -265,10 +265,17 @@ function InvoiceProcessor() {
       
       // Auto-suggest accounts for each line item
       if (extractedData.lineItems && accounts.length > 0) {
-        extractedData.lineItems = extractedData.lineItems.map(item => ({
-          ...item,
-          account_id: item.account_id || suggestAccount(item.description)
-        }));
+        extractedData.lineItems = extractedData.lineItems.map(item => {
+          const suggestedAccountId = item.account_id || suggestAccount(item.description);
+          const suggestedAccount = accounts.find(a => a.account_id === suggestedAccountId);
+          
+          return {
+            ...item,
+            account_id: suggestedAccountId,
+            account_search: suggestedAccount?.account_name || '',
+            account_dropdown_open: false
+          };
+        });
       }
       
       // Update file with extracted data
@@ -885,25 +892,65 @@ function InvoiceProcessor() {
                             />
                           </div>
                           <div>
-                            <select
-                              value={item.account_id || ''}
-                              onChange={(e) => {
-                                updateLineItem(index, 'account_id', e.target.value);
-                                if (e.target.value) {
-                                  saveAccountMapping(item.description, e.target.value);
-                                }
-                              }}
-                              className={`w-full px-2 py-1 border rounded text-sm ${
-                                !item.account_id ? 'border-red-300 bg-red-50' : 'border-gray-300'
-                              }`}
-                            >
-                              <option value="">Select GL Account (Required)</option>
-                              {(accounts || []).map(acc => (
-                                <option key={acc.account_id} value={acc.account_id}>
-                                  {acc.account_name} ({acc.account_type})
-                                </option>
-                              ))}
-                            </select>
+                            <div className="relative">
+                              <input
+                                type="text"
+                                placeholder="Search GL accounts..."
+                                value={item.account_search || ''}
+                                onChange={(e) => {
+                                  updateLineItem(index, 'account_search', e.target.value);
+                                }}
+                                onFocus={() => updateLineItem(index, 'account_dropdown_open', true)}
+                                className={`w-full px-2 py-1 border rounded text-sm ${
+                                  !item.account_id ? 'border-red-300 bg-red-50' : 'border-gray-300'
+                                }`}
+                              />
+                              {item.account_dropdown_open && (
+                                <>
+                                  <div 
+                                    className="fixed inset-0 z-10"
+                                    onClick={() => updateLineItem(index, 'account_dropdown_open', false)}
+                                  />
+                                  <div className="absolute z-20 w-full mt-1 bg-white border border-gray-300 rounded-lg shadow-lg max-h-60 overflow-y-auto">
+                                    {(accounts || [])
+                                      .filter(acc => {
+                                        const search = (item.account_search || '').toLowerCase();
+                                        return !search || 
+                                          acc.account_name.toLowerCase().includes(search) ||
+                                          acc.account_type.toLowerCase().includes(search);
+                                      })
+                                      .map(acc => (
+                                        <div
+                                          key={acc.account_id}
+                                          onClick={() => {
+                                            updateLineItem(index, 'account_id', acc.account_id);
+                                            updateLineItem(index, 'account_search', acc.account_name);
+                                            updateLineItem(index, 'account_dropdown_open', false);
+                                            if (acc.account_id) {
+                                              saveAccountMapping(item.description, acc.account_id);
+                                            }
+                                          }}
+                                          className="px-3 py-2 hover:bg-emerald-50 cursor-pointer text-sm border-b last:border-b-0"
+                                        >
+                                          <div className="font-medium">{acc.account_name}</div>
+                                          <div className="text-xs text-gray-500">{acc.account_type}</div>
+                                        </div>
+                                      ))
+                                    }
+                                    {(accounts || []).filter(acc => {
+                                      const search = (item.account_search || '').toLowerCase();
+                                      return !search || 
+                                        acc.account_name.toLowerCase().includes(search) ||
+                                        acc.account_type.toLowerCase().includes(search);
+                                    }).length === 0 && (
+                                      <div className="px-3 py-2 text-sm text-gray-500">
+                                        No accounts match "{item.account_search}"
+                                      </div>
+                                    )}
+                                  </div>
+                                </>
+                              )}
+                            </div>
                           </div>
                         </div>
                       ))}
