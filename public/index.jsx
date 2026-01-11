@@ -835,7 +835,7 @@ function InvoiceProcessor() {
                   {/* Line Items */}
                   <div>
                     <label className="block text-sm font-medium text-gray-700 mb-2">
-                      Line Items
+                      Line Items {accounts && accounts.length > 0 && `(${accounts.length} accounts loaded)`}
                     </label>
                     <div className="space-y-3">
                       {currentPreview.extractedData.lineItems?.map((item, index) => (
@@ -879,7 +879,7 @@ function InvoiceProcessor() {
                               }`}
                             >
                               <option value="">Select GL Account (Required)</option>
-                              {accounts.map(acc => (
+                              {(accounts || []).map(acc => (
                                 <option key={acc.account_id} value={acc.account_id}>
                                   {acc.account_name} ({acc.account_type})
                                 </option>
