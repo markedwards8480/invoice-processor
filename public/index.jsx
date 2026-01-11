@@ -35,6 +35,11 @@ function InvoiceProcessor() {
     if (savedMappings) {
       setAccountMappings(JSON.parse(savedMappings));
     }
+    
+    const savedAccounts = localStorage.getItem('zohoAccounts');
+    if (savedAccounts) {
+      setAccounts(JSON.parse(savedAccounts));
+    }
   }, []);
 
   // Save config to localStorage
@@ -70,8 +75,13 @@ function InvoiceProcessor() {
       }
 
       const data = await response.json();
-      setAccounts(data.accounts || []);
-      addToLog('success', `✓ Loaded ${data.accounts?.length || 0} accounts from Zoho Books`);
+      const loadedAccounts = data.accounts || [];
+      setAccounts(loadedAccounts);
+      
+      // Save to localStorage
+      localStorage.setItem('zohoAccounts', JSON.stringify(loadedAccounts));
+      
+      addToLog('success', `✓ Loaded ${loadedAccounts.length} accounts from Zoho Books`);
       
     } catch (error) {
       addToLog('error', `Failed to load accounts: ${error.message}`);
@@ -675,12 +685,21 @@ function InvoiceProcessor() {
                             <p className="text-xs text-red-600 mt-1">{file.error}</p>
                           )}
                         </div>
-                        <span className="text-xs px-2 py-1 rounded">
-                          {file.status === 'success' && '✓'}
-                          {file.status === 'error' && '✗'}
-                          {file.status === 'processing' && '⏳'}
-                          {file.status === 'pending' && '⋯'}
-                        </span>
+                        <div className="flex items-center gap-2">
+                          <span className="text-xs px-2 py-1 rounded">
+                            {file.status === 'success' && '✓'}
+                            {file.status === 'error' && '✗'}
+                            {file.status === 'processing' && '⏳'}
+                            {file.status === 'pending' && '⋯'}
+                          </span>
+                          <button
+                            onClick={() => setFiles(prev => prev.filter(f => f.id !== file.id))}
+                            className="text-gray-400 hover:text-red-600 text-lg font-bold"
+                            title="Remove from queue"
+                          >
+                            ×
+                          </button>
+                        </div>
                       </div>
                     </div>
                   ))}
