@@ -214,6 +214,45 @@ app.post('/api/zoho/bill', async (req, res) => {
   }
 });
 
+// Proxy endpoint for Zoho Books API - Get Chart of Accounts
+app.post('/api/zoho/accounts', async (req, res) => {
+  try {
+    const { organizationId, accessToken, apiDomain } = req.body;
+
+    console.log('Fetching chart of accounts from Zoho Books');
+    
+    const url = `${apiDomain}/books/v3/chartofaccounts?organization_id=${organizationId}`;
+    
+    const response = await fetch(url, {
+      headers: {
+        'Authorization': `Zoho-oauthtoken ${accessToken}`
+      }
+    });
+
+    if (!response.ok) {
+      const errorText = await response.text();
+      console.error('Zoho API error:', errorText);
+      return res.status(response.status).json({ 
+        error: 'Failed to fetch accounts',
+        details: errorText
+      });
+    }
+
+    const data = await response.json();
+    
+    // Filter to only expense accounts for simplicity
+    const expenseAccounts = data.chartofaccounts || [];
+    
+    console.log(`Fetched ${expenseAccounts.length} accounts`);
+    
+    res.json({ accounts: expenseAccounts });
+
+  } catch (error) {
+    console.error('Accounts fetch error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
 // Proxy endpoint for Claude API - Extract invoice data
 app.post('/api/claude/extract', async (req, res) => {
   try {
