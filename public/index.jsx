@@ -4,7 +4,10 @@ function InvoiceProcessor() {
   const [config, setConfig] = useState({
     apiDomain: 'https://www.zohoapis.com',
     organizationId: '',
-    accessToken: ''
+    accessToken: '',
+    refreshToken: '',
+    clientId: '',
+    clientSecret: ''
   });
   
   const [files, setFiles] = useState([]);
@@ -32,6 +35,55 @@ function InvoiceProcessor() {
     localStorage.setItem('zohoConfig', JSON.stringify(config));
     setShowSettings(false);
     addToLog('success', 'Settings saved successfully');
+  };
+
+  // Automatically refresh access token when expired
+  const refreshAccessToken = async () => {
+    if (!config.refreshToken || !config.clientId || !config.clientSecret) {
+      addToLog('error', 'Cannot refresh token: Missing refresh token or client credentials');
+      return null;
+    }
+
+    try {
+      addToLog('info', 'Refreshing access token...');
+
+      const response = await fetch('https://accounts.zoho.com/oauth/v2/token', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/x-www-form-urlencoded',
+        },
+        body: new URLSearchParams({
+          refresh_token: config.refreshToken,
+          client_id: config.clientId,
+          client_secret: config.clientSecret,
+          grant_type: 'refresh_token'
+        })
+      });
+
+      if (!response.ok) {
+        throw new Error('Failed to refresh token');
+      }
+
+      const data = await response.json();
+      
+      if (data.access_token) {
+        // Update config with new access token
+        const newConfig = {
+          ...config,
+          accessToken: data.access_token
+        };
+        setConfig(newConfig);
+        localStorage.setItem('zohoConfig', JSON.stringify(newConfig));
+        
+        addToLog('success', '✓ Access token refreshed successfully');
+        return data.access_token;
+      } else {
+        throw new Error('No access token in response');
+      }
+    } catch (error) {
+      addToLog('error', `Failed to refresh access token: ${error.message}. Please update your credentials in Settings.`);
+      return null;
+    }
   };
 
   // Add entry to activity log
@@ -132,7 +184,7 @@ function InvoiceProcessor() {
   };
 
   // Upload to Zoho Books
-  const uploadToZoho = async (fileObj) => {
+  const uploadToZoho = async (fileObj, retryCount = 0) => {
     if (!fileObj.extractedData) {
       throw new Error('No data extracted');
     }
@@ -153,6 +205,18 @@ function InvoiceProcessor() {
           apiDomain: config.apiDomain
         })
       });
+
+      // Auto-retry with refreshed token on 401
+      if (vendorResponse.status === 401 && retryCount === 0) {
+        addToLog('warning', 'Access token expired, refreshing...');
+        const newToken = await refreshAccessToken();
+        if (newToken) {
+          // Retry with new token
+          return uploadToZoho(fileObj, 1);
+        } else {
+          throw new Error('Access token expired. Please update your token in Settings.');
+        }
+      }
 
       if (!vendorResponse.ok) {
         const errorData = await vendorResponse.json().catch(() => ({}));
@@ -357,6 +421,54 @@ function InvoiceProcessor() {
                   placeholder="Enter your Zoho Access Token"
                 />
               </div>
+              
+              <div className="border-t pt-4 mt-4">
+                <h3 className="text-sm font-semibold text-gray-700 mb-3">Auto-Refresh Settings (Optional)</h3>
+                <p className="text-xs text-gray-600 mb-3">
+                  Enable automatic token refresh by providing your refresh token and client credentials. 
+                  This prevents "token expired" errors.
+                </p>
+                
+                <div className="space-y-3">
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-1">
+                      Refresh Token
+                    </label>
+                    <input
+                      type="password"
+                      value={config.refreshToken}
+                      onChange={(e) => setConfig({...config, refreshToken: e.target.value})}
+                      className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-emerald-500"
+                      placeholder="1000.xxx..."
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-1">
+                      Client ID
+                    </label>
+                    <input
+                      type="text"
+                      value={config.clientId}
+                      onChange={(e) => setConfig({...config, clientId: e.target.value})}
+                      className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-emerald-500"
+                      placeholder="1000.ES86MGZHSXB975Y195X46VW7SBE3FF"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-1">
+                      Client Secret
+                    </label>
+                    <input
+                      type="password"
+                      value={config.clientSecret}
+                      onChange={(e) => setConfig({...config, clientSecret: e.target.value})}
+                      className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-emerald-500"
+                      placeholder="7abf2fc01230a4b9a0c08f4837aef870f231973226"
+                    />
+                  </div>
+                </div>
+              </div>
+              
               <button
                 onClick={saveConfig}
                 className="px-6 py-2 bg-emerald-600 text-white rounded-lg hover:bg-emerald-700 transition"
