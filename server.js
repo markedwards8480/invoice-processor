@@ -1,51 +1,73 @@
 const express = require('express');
 const cors = require('cors');
 const fetch = require('node-fetch');
-const fs = require('fs').promises;
-const path = require('path');
+const { Pool } = require('pg');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// Data directory for persistent storage
-const DATA_DIR = path.join(__dirname, 'data');
+// PostgreSQL connection
+const pool = new Pool({
+  connectionString: process.env.DATABASE_URL,
+  ssl: process.env.DATABASE_URL ? { rejectUnauthorized: false } : false
+});
 
-// Ensure data directory exists
-async function initializeDataDir() {
+// Initialize database tables
+async function initializeDatabase() {
   try {
-    await fs.mkdir(DATA_DIR, { recursive: true });
-    console.log('Data directory initialized:', DATA_DIR);
+    // Create config table
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS config (
+        id SERIAL PRIMARY KEY,
+        key VARCHAR(255) UNIQUE NOT NULL,
+        value TEXT NOT NULL,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      )
+    `);
+    
+    // Create gl_mappings table
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS gl_mappings (
+        id SERIAL PRIMARY KEY,
+        keyword VARCHAR(255) UNIQUE NOT NULL,
+        account_id VARCHAR(255) NOT NULL,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      )
+    `);
+    
+    // Create accounts_cache table
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS accounts_cache (
+        id SERIAL PRIMARY KEY,
+        accounts JSONB NOT NULL,
+        cached_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      )
+    `);
+    
+    console.log('Database tables initialized successfully');
   } catch (error) {
-    console.error('Error creating data directory:', error);
+    console.error('Error initializing database:', error);
   }
 }
 
-initializeDataDir();
-
-// Helper functions for data persistence
-async function readData(filename, defaultValue = null) {
-  try {
-    const filePath = path.join(DATA_DIR, filename);
-    const data = await fs.readFile(filePath, 'utf8');
-    return JSON.parse(data);
-  } catch (error) {
-    if (error.code === 'ENOENT') {
-      return defaultValue;
-    }
-    throw error;
-  }
-}
-
-async function writeData(filename, data) {
-  const filePath = path.join(DATA_DIR, filename);
-  await fs.writeFile(filePath, JSON.stringify(data, null, 2), 'utf8');
-}
+initializeDatabase();
 
 // API endpoint to save configuration
 app.post('/api/config/save', async (req, res) => {
   try {
     const config = req.body;
-    await writeData('config.json', config);
+    
+    // Store each config field
+    for (const [key, value] of Object.entries(config)) {
+      await pool.query(
+        `INSERT INTO config (key, value, updated_at) 
+         VALUES ($1, $2, CURRENT_TIMESTAMP)
+         ON CONFLICT (key) 
+         DO UPDATE SET value = $2, updated_at = CURRENT_TIMESTAMP`,
+        [key, JSON.stringify(value)]
+      );
+    }
+    
     res.json({ success: true, message: 'Configuration saved' });
   } catch (error) {
     console.error('Error saving config:', error);
@@ -56,14 +78,21 @@ app.post('/api/config/save', async (req, res) => {
 // API endpoint to load configuration
 app.get('/api/config/load', async (req, res) => {
   try {
-    const config = await readData('config.json', {
+    const result = await pool.query('SELECT key, value FROM config');
+    
+    const config = {
       apiDomain: 'https://www.zohoapis.com',
       organizationId: '',
       accessToken: '',
       refreshToken: '',
       clientId: '',
       clientSecret: ''
+    };
+    
+    result.rows.forEach(row => {
+      config[row.key] = JSON.parse(row.value);
     });
+    
     res.json(config);
   } catch (error) {
     console.error('Error loading config:', error);
@@ -75,9 +104,17 @@ app.get('/api/config/load', async (req, res) => {
 app.post('/api/mappings/save', async (req, res) => {
   try {
     const { mappings } = req.body;
-    const existingMappings = await readData('gl_mappings.json', {});
-    const updatedMappings = { ...existingMappings, ...mappings };
-    await writeData('gl_mappings.json', updatedMappings);
+    
+    for (const [keyword, accountId] of Object.entries(mappings)) {
+      await pool.query(
+        `INSERT INTO gl_mappings (keyword, account_id, updated_at)
+         VALUES ($1, $2, CURRENT_TIMESTAMP)
+         ON CONFLICT (keyword)
+         DO UPDATE SET account_id = $2, updated_at = CURRENT_TIMESTAMP`,
+        [keyword, accountId]
+      );
+    }
+    
     res.json({ success: true, message: 'Mappings saved' });
   } catch (error) {
     console.error('Error saving mappings:', error);
@@ -88,7 +125,13 @@ app.post('/api/mappings/save', async (req, res) => {
 // API endpoint to load GL account mappings
 app.get('/api/mappings/load', async (req, res) => {
   try {
-    const mappings = await readData('gl_mappings.json', {});
+    const result = await pool.query('SELECT keyword, account_id FROM gl_mappings');
+    
+    const mappings = {};
+    result.rows.forEach(row => {
+      mappings[row.keyword] = row.account_id;
+    });
+    
     res.json({ mappings });
   } catch (error) {
     console.error('Error loading mappings:', error);
@@ -100,7 +143,16 @@ app.get('/api/mappings/load', async (req, res) => {
 app.post('/api/accounts/cache', async (req, res) => {
   try {
     const { accounts } = req.body;
-    await writeData('accounts_cache.json', { accounts, cachedAt: new Date().toISOString() });
+    
+    // Delete old cache
+    await pool.query('DELETE FROM accounts_cache');
+    
+    // Insert new cache
+    await pool.query(
+      'INSERT INTO accounts_cache (accounts, cached_at) VALUES ($1, CURRENT_TIMESTAMP)',
+      [JSON.stringify(accounts)]
+    );
+    
     res.json({ success: true, message: 'Accounts cached' });
   } catch (error) {
     console.error('Error caching accounts:', error);
@@ -111,8 +163,18 @@ app.post('/api/accounts/cache', async (req, res) => {
 // API endpoint to load cached GL accounts
 app.get('/api/accounts/cache', async (req, res) => {
   try {
-    const cache = await readData('accounts_cache.json', { accounts: [], cachedAt: null });
-    res.json(cache);
+    const result = await pool.query(
+      'SELECT accounts, cached_at FROM accounts_cache ORDER BY cached_at DESC LIMIT 1'
+    );
+    
+    if (result.rows.length > 0) {
+      res.json({
+        accounts: JSON.parse(result.rows[0].accounts),
+        cachedAt: result.rows[0].cached_at
+      });
+    } else {
+      res.json({ accounts: [], cachedAt: null });
+    }
   } catch (error) {
     console.error('Error loading cached accounts:', error);
     res.status(500).json({ error: 'Failed to load cached accounts' });
