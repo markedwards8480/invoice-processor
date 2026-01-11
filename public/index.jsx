@@ -19,36 +19,67 @@ function InvoiceProcessor() {
   const [accounts, setAccounts] = useState([]);
   const [accountMappings, setAccountMappings] = useState({});
 
-  // Load config from localStorage
+  // Load config from server
   useEffect(() => {
-    const saved = localStorage.getItem('zohoConfig');
-    if (saved) {
-      setConfig(JSON.parse(saved));
-    }
+    const loadServerData = async () => {
+      try {
+        // Load configuration
+        const configRes = await fetch('/api/config/load');
+        if (configRes.ok) {
+          const serverConfig = await configRes.json();
+          setConfig(serverConfig);
+        }
+        
+        // Load GL account mappings
+        const mappingsRes = await fetch('/api/mappings/load');
+        if (mappingsRes.ok) {
+          const data = await mappingsRes.json();
+          setAccountMappings(data.mappings || {});
+        }
+        
+        // Load cached accounts
+        const accountsRes = await fetch('/api/accounts/cache');
+        if (accountsRes.ok) {
+          const cache = await accountsRes.json();
+          if (cache.accounts && cache.accounts.length > 0) {
+            setAccounts(cache.accounts);
+          }
+        }
+        
+        // Load activity log from localStorage (keep this local per user)
+        const savedLog = localStorage.getItem('activityLog');
+        if (savedLog) {
+          setActivityLog(JSON.parse(savedLog));
+        }
+      } catch (error) {
+        console.error('Error loading server data:', error);
+        addToLog('error', 'Failed to load configuration from server');
+      }
+    };
     
-    const savedLog = localStorage.getItem('activityLog');
-    if (savedLog) {
-      setActivityLog(JSON.parse(savedLog));
-    }
-    
-    const savedMappings = localStorage.getItem('accountMappings');
-    if (savedMappings) {
-      setAccountMappings(JSON.parse(savedMappings));
-    }
-    
-    const savedAccounts = localStorage.getItem('zohoAccounts');
-    if (savedAccounts) {
-      setAccounts(JSON.parse(savedAccounts));
-    }
+    loadServerData();
   }, []);
 
-  // Save config to localStorage
-  const saveConfig = () => {
-    localStorage.setItem('zohoConfig', JSON.stringify(config));
-    setShowSettings(false);
-    addToLog('success', 'Settings saved successfully');
-    // Fetch accounts after saving config
-    fetchAccounts();
+  // Save config to server
+  const saveConfig = async () => {
+    try {
+      const response = await fetch('/api/config/save', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(config)
+      });
+      
+      if (response.ok) {
+        setShowSettings(false);
+        addToLog('success', 'Settings saved successfully');
+        // Fetch accounts after saving config
+        fetchAccounts();
+      } else {
+        addToLog('error', 'Failed to save settings');
+      }
+    } catch (error) {
+      addToLog('error', `Failed to save settings: ${error.message}`);
+    }
   };
 
   // Fetch Chart of Accounts from Zoho Books
@@ -78,8 +109,12 @@ function InvoiceProcessor() {
       const loadedAccounts = data.accounts || [];
       setAccounts(loadedAccounts);
       
-      // Save to localStorage
-      localStorage.setItem('zohoAccounts', JSON.stringify(loadedAccounts));
+      // Cache to server
+      await fetch('/api/accounts/cache', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ accounts: loadedAccounts })
+      });
       
       addToLog('success', `✓ Loaded ${loadedAccounts.length} accounts from Zoho Books`);
       
@@ -129,7 +164,7 @@ function InvoiceProcessor() {
   };
 
   // Save account mapping for future use
-  const saveAccountMapping = (description, accountId) => {
+  const saveAccountMapping = async (description, accountId) => {
     // Extract key terms from description
     const keywords = description.toLowerCase()
       .replace(/[^a-z\s]/g, '')
@@ -137,12 +172,24 @@ function InvoiceProcessor() {
       .filter(word => word.length > 3);
     
     if (keywords.length > 0) {
-      const newMappings = { ...accountMappings };
+      const newMappings = {};
       keywords.forEach(keyword => {
         newMappings[keyword] = accountId;
       });
-      setAccountMappings(newMappings);
-      localStorage.setItem('accountMappings', JSON.stringify(newMappings));
+      
+      // Update local state
+      setAccountMappings(prev => ({ ...prev, ...newMappings }));
+      
+      // Save to server
+      try {
+        await fetch('/api/mappings/save', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ mappings: newMappings })
+        });
+      } catch (error) {
+        console.error('Failed to save mappings to server:', error);
+      }
     }
   };
 
