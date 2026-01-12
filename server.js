@@ -20,6 +20,13 @@ const pool = new Pool({
 // Initialize database tables
 async function initializeDatabase() {
   try {
+    // Drop existing tables to recreate with correct schema
+    await pool.query('DROP TABLE IF EXISTS accounts_cache CASCADE');
+    await pool.query('DROP TABLE IF EXISTS gl_mappings CASCADE');
+    await pool.query('DROP TABLE IF EXISTS config CASCADE');
+    
+    console.log('Dropped old tables, creating fresh schema...');
+    
     // Create config table
     await pool.query(`
       CREATE TABLE IF NOT EXISTS config (
@@ -128,6 +135,11 @@ app.post('/api/gl-mappings/save', async (req, res) => {
 app.get('/api/gl-mappings/get', async (req, res) => {
   try {
     const { keyword } = req.query;
+    
+    if (!keyword) {
+      return res.json({ accountId: null });
+    }
+    
     const result = await pool.query(
       'SELECT account_id FROM gl_mappings WHERE keyword = $1',
       [keyword.toLowerCase()]
@@ -148,6 +160,10 @@ app.get('/api/gl-mappings/get', async (req, res) => {
 app.post('/api/accounts/cache', async (req, res) => {
   try {
     const { accounts } = req.body;
+    
+    if (!accounts || !Array.isArray(accounts)) {
+      return res.status(400).json({ error: 'Invalid accounts data' });
+    }
     
     // Clear old cache
     await pool.query('DELETE FROM accounts_cache');
@@ -181,7 +197,7 @@ app.get('/api/accounts/cached', async (req, res) => {
 // Claude API endpoint for invoice extraction
 app.post('/api/claude/extract', async (req, res) => {
   try {
-    const { fileContent, fileName } = req.body;
+    const { base64Data } = req.body;
     
     console.log('Extracting invoice data with Claude...');
     
@@ -189,7 +205,7 @@ app.post('/api/claude/extract', async (req, res) => {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        'x-api-key': process.env.ANTHROPIC_API_KEY || req.headers['x-anthropic-api-key'],
+        'x-api-key': process.env.ANTHROPIC_API_KEY,
         'anthropic-version': '2023-06-01'
       },
       body: JSON.stringify({
@@ -203,7 +219,7 @@ app.post('/api/claude/extract', async (req, res) => {
               source: {
                 type: 'base64',
                 media_type: 'application/pdf',
-                data: fileContent.split(',')[1]
+                data: base64Data
               }
             },
             {
@@ -220,8 +236,7 @@ app.post('/api/claude/extract', async (req, res) => {
       "description": "item description",
       "quantity": number,
       "rate": number,
-      "amount": number,
-      "glAccount": ""
+      "amount": number
     }
   ],
   "subtotal": number,
@@ -354,18 +369,17 @@ app.post('/api/zoho/bill', async (req, res) => {
   }
 });
 
-app.get('/api/zoho/accounts', async (req, res) => {
+app.post('/api/zoho/accounts', async (req, res) => {
   try {
-    const { config } = req.query;
-    const configObj = JSON.parse(config);
+    const { organizationId, accessToken, apiDomain } = req.body;
     
     console.log('Fetching chart of accounts from Zoho...');
     
     const response = await fetch(
-      `${configObj.apiDomain}/books/v3/chartofaccounts?organization_id=${configObj.organizationId}`,
+      `${apiDomain}/books/v3/chartofaccounts?organization_id=${organizationId}`,
       {
         headers: {
-          'Authorization': `Zoho-oauthtoken ${configObj.accessToken}`
+          'Authorization': `Zoho-oauthtoken ${accessToken}`
         }
       }
     );
@@ -378,7 +392,7 @@ app.get('/api/zoho/accounts', async (req, res) => {
 
     const data = await response.json();
     console.log('Successfully fetched accounts:', data.chartofaccounts?.length || 0);
-    res.json(data);
+    res.json({ accounts: data.chartofaccounts || [] });
   } catch (error) {
     console.error('Error fetching accounts:', error);
     res.status(500).json({ error: error.message });
