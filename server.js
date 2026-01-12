@@ -20,13 +20,6 @@ const pool = new Pool({
 // Initialize database tables
 async function initializeDatabase() {
   try {
-    // Drop existing tables to recreate with correct schema
-    await pool.query('DROP TABLE IF EXISTS accounts_cache CASCADE');
-    await pool.query('DROP TABLE IF EXISTS gl_mappings CASCADE');
-    await pool.query('DROP TABLE IF EXISTS config CASCADE');
-    
-    console.log('Dropped old tables, creating fresh schema...');
-    
     // Create config table
     await pool.query(`
       CREATE TABLE IF NOT EXISTS config (
@@ -54,6 +47,24 @@ async function initializeDatabase() {
         account_id VARCHAR(255) UNIQUE NOT NULL,
         account_name TEXT NOT NULL,
         cached_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      )
+    `);
+
+    // Create transactions table for audit log
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS transactions (
+        id SERIAL PRIMARY KEY,
+        processed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        vendor_name VARCHAR(255) NOT NULL,
+        invoice_number VARCHAR(255) NOT NULL,
+        invoice_date DATE,
+        total_amount DECIMAL(10, 2),
+        currency VARCHAR(10),
+        status VARCHAR(50) NOT NULL,
+        zoho_bill_id VARCHAR(255),
+        extracted_data JSONB,
+        error_message TEXT,
+        file_name VARCHAR(255)
       )
     `);
 
@@ -191,6 +202,84 @@ app.get('/api/accounts/cached', async (req, res) => {
   } catch (error) {
     console.error('Error getting cached accounts:', error);
     res.status(500).json({ error: 'Failed to get cached accounts' });
+  }
+});
+
+// API endpoint to save transaction to ledger
+app.post('/api/transactions/save', async (req, res) => {
+  try {
+    const { 
+      vendorName, 
+      invoiceNumber, 
+      invoiceDate, 
+      totalAmount, 
+      currency, 
+      status, 
+      zohoBillId, 
+      extractedData,
+      errorMessage,
+      fileName
+    } = req.body;
+    
+    const result = await pool.query(
+      `INSERT INTO transactions 
+       (vendor_name, invoice_number, invoice_date, total_amount, currency, status, zoho_bill_id, extracted_data, error_message, file_name) 
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) 
+       RETURNING id`,
+      [vendorName, invoiceNumber, invoiceDate, totalAmount, currency, status, zohoBillId, JSON.stringify(extractedData), errorMessage, fileName]
+    );
+
+    res.json({ success: true, transactionId: result.rows[0].id });
+  } catch (error) {
+    console.error('Error saving transaction:', error);
+    res.status(500).json({ error: 'Failed to save transaction' });
+  }
+});
+
+// API endpoint to get transaction history
+app.get('/api/transactions/history', async (req, res) => {
+  try {
+    const { limit = 50, offset = 0 } = req.query;
+    
+    const result = await pool.query(
+      `SELECT id, processed_at, vendor_name, invoice_number, invoice_date, total_amount, currency, status, zoho_bill_id, error_message, file_name
+       FROM transactions 
+       ORDER BY processed_at DESC 
+       LIMIT $1 OFFSET $2`,
+      [limit, offset]
+    );
+
+    const countResult = await pool.query('SELECT COUNT(*) FROM transactions');
+    const totalCount = parseInt(countResult.rows[0].count);
+
+    res.json({ 
+      transactions: result.rows,
+      total: totalCount
+    });
+  } catch (error) {
+    console.error('Error getting transaction history:', error);
+    res.status(500).json({ error: 'Failed to get transaction history' });
+  }
+});
+
+// API endpoint to get single transaction details
+app.get('/api/transactions/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+    
+    const result = await pool.query(
+      'SELECT * FROM transactions WHERE id = $1',
+      [id]
+    );
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({ error: 'Transaction not found' });
+    }
+
+    res.json(result.rows[0]);
+  } catch (error) {
+    console.error('Error getting transaction:', error);
+    res.status(500).json({ error: 'Failed to get transaction' });
   }
 });
 
