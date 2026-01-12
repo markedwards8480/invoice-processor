@@ -18,6 +18,10 @@ function InvoiceProcessor() {
   const [editMode, setEditMode] = useState(false);
   const [accounts, setAccounts] = useState([]);
   const [accountMappings, setAccountMappings] = useState({});
+  const [activeTab, setActiveTab] = useState('upload'); // 'upload' or 'history'
+  const [transactions, setTransactions] = useState([]);
+  const [showBatchConfirm, setShowBatchConfirm] = useState(false);
+  const [batchToUpload, setBatchToUpload] = useState([]);
 
   // Load config from server
   useEffect(() => {
@@ -55,6 +59,9 @@ function InvoiceProcessor() {
         if (savedLog) {
           setActivityLog(JSON.parse(savedLog));
         }
+
+        // Load transaction history
+        loadTransactionHistory();
       } catch (error) {
         console.error('Error loading server data:', error);
         addToLog('error', 'Failed to load configuration from server');
@@ -63,6 +70,46 @@ function InvoiceProcessor() {
     
     loadServerData();
   }, []);
+
+  // Load transaction history
+  const loadTransactionHistory = async () => {
+    try {
+      const response = await fetch('/api/transactions/history?limit=100');
+      if (response.ok) {
+        const data = await response.json();
+        setTransactions(data.transactions || []);
+      }
+    } catch (error) {
+      console.error('Error loading transaction history:', error);
+    }
+  };
+
+  // Save transaction to ledger
+  const saveTransaction = async (invoiceData, status, zohoBillId = null, errorMessage = null, fileName = '') => {
+    try {
+      await fetch('/api/transactions/save', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          vendorName: invoiceData.vendorName,
+          invoiceNumber: invoiceData.invoiceNumber,
+          invoiceDate: invoiceData.invoiceDate,
+          totalAmount: invoiceData.total,
+          currency: invoiceData.currency || 'CAD',
+          status: status, // 'success' or 'error'
+          zohoBillId: zohoBillId,
+          extractedData: invoiceData,
+          errorMessage: errorMessage,
+          fileName: fileName
+        })
+      });
+      
+      // Reload transaction history
+      loadTransactionHistory();
+    } catch (error) {
+      console.error('Error saving transaction:', error);
+    }
+  };
 
   // Save config to server
   const saveConfig = async () => {
@@ -341,10 +388,6 @@ function InvoiceProcessor() {
       
       setFiles(prev => prev.map(f => f.id === fileObj.id ? updatedFile : f));
       
-      // Show preview for user to review
-      setCurrentPreview(updatedFile);
-      setEditMode(true);
-      
       addToLog('success', `Data extracted from ${fileObj.file.name}`);
       return updatedFile;
       
@@ -442,15 +485,22 @@ function InvoiceProcessor() {
       
       addToLog('success', `✓ Invoice ${data.invoiceNumber} uploaded successfully! Amount: $${data.total?.toFixed(2) || '0.00'} ${data.currency || 'CAD'}`);
 
+      // Save to transaction ledger
+      await saveTransaction(data, 'success', billResult.bill?.bill_id, null, fileObj.file.name);
+
       return billResult;
       
     } catch (error) {
       addToLog('error', `✗ Failed to upload ${data.invoiceNumber}: ${error.message}`);
+      
+      // Save failed transaction to ledger
+      await saveTransaction(data, 'error', null, error.message, fileObj.file.name);
+      
       throw error;
     }
   };
 
-  // Process current preview
+  // Process current preview (single invoice)
   const confirmAndUpload = async () => {
     if (!currentPreview) return;
     
@@ -472,6 +522,40 @@ function InvoiceProcessor() {
       setCurrentPreview(null);
       setEditMode(false);
     }
+  };
+
+  // Show batch confirmation modal
+  const showBatchConfirmation = () => {
+    const extractedFiles = files.filter(f => f.status === 'extracted');
+    if (extractedFiles.length === 0) {
+      addToLog('warning', 'No invoices ready to upload');
+      return;
+    }
+    
+    setBatchToUpload(extractedFiles);
+    setShowBatchConfirm(true);
+  };
+
+  // Upload batch after confirmation
+  const uploadBatch = async () => {
+    setShowBatchConfirm(false);
+    setProcessing(true);
+    
+    for (const file of batchToUpload) {
+      try {
+        await uploadToZoho(file);
+        setFiles(prev => prev.map(f => 
+          f.id === file.id ? { ...f, status: 'success' } : f
+        ));
+      } catch (error) {
+        setFiles(prev => prev.map(f => 
+          f.id === file.id ? { ...f, status: 'error', error: error.message } : f
+        ));
+      }
+    }
+    
+    setProcessing(false);
+    setBatchToUpload([]);
   };
 
   // Update extracted data during edit
@@ -517,18 +601,27 @@ function InvoiceProcessor() {
     
     const pendingFiles = files.filter(f => f.status === 'pending');
     
+    if (pendingFiles.length === 0) {
+      addToLog('warning', 'No pending files to process');
+      setProcessing(false);
+      return;
+    }
+    
+    // Process all files first
     for (const file of pendingFiles) {
       try {
-        const extracted = await processSingleInvoice(file);
-        // Wait for user to confirm each one
-        // This is handled by the preview modal
-        break; // Process one at a time, showing preview
+        await processSingleInvoice(file);
       } catch (error) {
         // Error already handled in processSingleInvoice
       }
     }
     
     setProcessing(false);
+    
+    // Show batch confirmation after all are processed
+    setTimeout(() => {
+      showBatchConfirmation();
+    }, 500);
   };
 
   // Clear activity log
@@ -678,136 +771,303 @@ function InvoiceProcessor() {
           </div>
         )}
 
-        <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-          
-          {/* Upload Section */}
-          <div className="bg-white rounded-lg shadow-lg p-6">
-            <h2 className="text-xl font-semibold mb-4">Upload Invoices</h2>
+        {/* Tab Navigation */}
+        <div className="bg-white rounded-lg shadow-lg mb-6">
+          <div className="flex border-b">
+            <button
+              onClick={() => setActiveTab('upload')}
+              className={`flex-1 px-6 py-4 font-medium transition ${
+                activeTab === 'upload'
+                  ? 'border-b-2 border-emerald-600 text-emerald-600'
+                  : 'text-gray-600 hover:text-gray-800'
+              }`}
+            >
+              📄 Upload Invoices
+            </button>
+            <button
+              onClick={() => setActiveTab('history')}
+              className={`flex-1 px-6 py-4 font-medium transition ${
+                activeTab === 'history'
+                  ? 'border-b-2 border-emerald-600 text-emerald-600'
+                  : 'text-gray-600 hover:text-gray-800'
+              }`}
+            >
+              📊 Transaction History ({transactions.length})
+            </button>
+          </div>
+        </div>
+
+        {activeTab === 'upload' ? (
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
             
-            <div className="border-2 border-dashed border-gray-300 rounded-lg p-8 text-center hover:border-emerald-500 transition">
-              <input
-                type="file"
-                accept=".pdf"
-                multiple
-                onChange={handleFileSelect}
-                className="hidden"
-                id="fileInput"
-              />
-              <label htmlFor="fileInput" className="cursor-pointer">
-                <div className="text-6xl mb-4">📄</div>
-                <p className="text-lg font-medium text-gray-700">
-                  Drop PDF invoices here or click to browse
-                </p>
-                <p className="text-sm text-gray-500 mt-2">
-                  Supports multiple file upload
-                </p>
-              </label>
+            {/* Upload Section */}
+            <div className="bg-white rounded-lg shadow-lg p-6">
+              <h2 className="text-xl font-semibold mb-4">Upload Invoices</h2>
+              
+              <div className="border-2 border-dashed border-gray-300 rounded-lg p-8 text-center hover:border-emerald-500 transition">
+                <input
+                  type="file"
+                  accept=".pdf"
+                  multiple
+                  onChange={handleFileSelect}
+                  className="hidden"
+                  id="fileInput"
+                />
+                <label htmlFor="fileInput" className="cursor-pointer">
+                  <div className="text-6xl mb-4">📄</div>
+                  <p className="text-lg font-medium text-gray-700">
+                    Drop PDF invoices here or click to browse
+                  </p>
+                  <p className="text-sm text-gray-500 mt-2">
+                    Supports multiple file upload
+                  </p>
+                </label>
+              </div>
+
+              {/* File Queue */}
+              {files.length > 0 && (
+                <div className="mt-6">
+                  <div className="flex justify-between items-center mb-3">
+                    <h3 className="font-semibold">Queue ({files.length})</h3>
+                    <div className="flex gap-2">
+                      <button
+                        onClick={processAllFiles}
+                        disabled={processing || files.every(f => f.status !== 'pending')}
+                        className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition disabled:bg-gray-300"
+                      >
+                        {processing ? 'Processing...' : 'Process All'}
+                      </button>
+                      <button
+                        onClick={showBatchConfirmation}
+                        disabled={processing || files.every(f => f.status !== 'extracted')}
+                        className="px-4 py-2 bg-emerald-600 text-white rounded-lg hover:bg-emerald-700 transition disabled:bg-gray-300"
+                      >
+                        Upload to Zoho
+                      </button>
+                    </div>
+                  </div>
+                  
+                  <div className="space-y-2 max-h-96 overflow-y-auto">
+                    {files.map(file => (
+                      <div
+                        key={file.id}
+                        className={`p-3 rounded-lg border ${
+                          file.status === 'success' ? 'bg-green-50 border-green-200' :
+                          file.status === 'error' ? 'bg-red-50 border-red-200' :
+                          file.status === 'extracted' ? 'bg-blue-50 border-blue-200' :
+                          file.status === 'processing' ? 'bg-yellow-50 border-yellow-200' :
+                          'bg-gray-50 border-gray-200'
+                        }`}
+                      >
+                        <div className="flex justify-between items-start">
+                          <div className="flex-1">
+                            <p className="font-medium text-sm truncate">{file.file.name}</p>
+                            {file.extractedData && (
+                              <p className="text-xs text-gray-600 mt-1">
+                                {file.extractedData.vendorName} | Invoice #{file.extractedData.invoiceNumber} | ${file.extractedData.total?.toFixed(2)}
+                              </p>
+                            )}
+                            {file.error && (
+                              <p className="text-xs text-red-600 mt-1">{file.error}</p>
+                            )}
+                          </div>
+                          <div className="flex items-center gap-2">
+                            <span className="text-xs px-2 py-1 rounded">
+                              {file.status === 'success' && '✓ Uploaded'}
+                              {file.status === 'error' && '✗ Failed'}
+                              {file.status === 'extracted' && '📝 Ready'}
+                              {file.status === 'processing' && '⏳ Processing'}
+                              {file.status === 'pending' && '⋯ Pending'}
+                            </span>
+                            {file.status === 'extracted' && (
+                              <button
+                                onClick={() => { setCurrentPreview(file); setEditMode(true); }}
+                                className="text-xs px-2 py-1 bg-blue-600 text-white rounded hover:bg-blue-700"
+                              >
+                                Review
+                              </button>
+                            )}
+                            <button
+                              onClick={() => setFiles(prev => prev.filter(f => f.id !== file.id))}
+                              className="text-gray-400 hover:text-red-600 text-lg font-bold"
+                              title="Remove from queue"
+                            >
+                              ×
+                            </button>
+                          </div>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
             </div>
 
-            {/* File Queue */}
-            {files.length > 0 && (
-              <div className="mt-6">
-                <div className="flex justify-between items-center mb-3">
-                  <h3 className="font-semibold">Queue ({files.length})</h3>
-                  <button
-                    onClick={processAllFiles}
-                    disabled={processing || files.every(f => f.status !== 'pending')}
-                    className="px-4 py-2 bg-emerald-600 text-white rounded-lg hover:bg-emerald-700 transition disabled:bg-gray-300"
-                  >
-                    {processing ? 'Processing...' : 'Process All'}
-                  </button>
-                </div>
-                
-                <div className="space-y-2 max-h-96 overflow-y-auto">
-                  {files.map(file => (
+            {/* Activity Log */}
+            <div className="bg-white rounded-lg shadow-lg p-6">
+              <div className="flex justify-between items-center mb-4">
+                <h2 className="text-xl font-semibold">Activity Log</h2>
+                <button
+                  onClick={clearLog}
+                  className="text-xs px-3 py-1 bg-gray-100 hover:bg-gray-200 rounded transition"
+                >
+                  Clear
+                </button>
+              </div>
+              
+              <div className="space-y-2 max-h-[500px] overflow-y-auto">
+                {activityLog.length === 0 ? (
+                  <p className="text-gray-500 text-sm text-center py-8">No activity yet</p>
+                ) : (
+                  activityLog.map(entry => (
                     <div
-                      key={file.id}
-                      className={`p-3 rounded-lg border ${
-                        file.status === 'success' ? 'bg-green-50 border-green-200' :
-                        file.status === 'error' ? 'bg-red-50 border-red-200' :
-                        file.status === 'processing' ? 'bg-blue-50 border-blue-200' :
-                        'bg-gray-50 border-gray-200'
+                      key={entry.id}
+                      className={`p-3 rounded-lg text-sm ${
+                        entry.type === 'success' ? 'bg-green-50 border-l-4 border-green-500' :
+                        entry.type === 'error' ? 'bg-red-50 border-l-4 border-red-500' :
+                        entry.type === 'warning' ? 'bg-yellow-50 border-l-4 border-yellow-500' :
+                        'bg-blue-50 border-l-4 border-blue-500'
                       }`}
                     >
+                      <div className="flex justify-between items-start mb-1">
+                        <span className="font-medium">
+                          {entry.type === 'success' && '✓ '}
+                          {entry.type === 'error' && '✗ '}
+                          {entry.type === 'warning' && '⚠ '}
+                          {entry.type === 'info' && 'ℹ '}
+                          {entry.message}
+                        </span>
+                        <span className="text-xs text-gray-500">
+                          {new Date(entry.timestamp).toLocaleTimeString()}
+                        </span>
+                      </div>
+                    </div>
+                  ))
+                )}
+              </div>
+            </div>
+          </div>
+        ) : (
+          /* Transaction History Tab */
+          <div className="bg-white rounded-lg shadow-lg p-6">
+            <h2 className="text-xl font-semibold mb-4">Transaction History</h2>
+            
+            {transactions.length === 0 ? (
+              <p className="text-gray-500 text-center py-12">No transactions yet. Upload and process invoices to see them here.</p>
+            ) : (
+              <div className="overflow-x-auto">
+                <table className="w-full">
+                  <thead>
+                    <tr className="border-b">
+                      <th className="text-left py-3 px-2">Date</th>
+                      <th className="text-left py-3 px-2">Vendor</th>
+                      <th className="text-left py-3 px-2">Invoice #</th>
+                      <th className="text-left py-3 px-2">Amount</th>
+                      <th className="text-left py-3 px-2">Status</th>
+                      <th className="text-left py-3 px-2">Zoho Bill ID</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {transactions.map(txn => (
+                      <tr key={txn.id} className="border-b hover:bg-gray-50">
+                        <td className="py-3 px-2 text-sm">
+                          {new Date(txn.processed_at).toLocaleDateString()} <br/>
+                          <span className="text-xs text-gray-500">
+                            {new Date(txn.processed_at).toLocaleTimeString()}
+                          </span>
+                        </td>
+                        <td className="py-3 px-2 text-sm font-medium">{txn.vendor_name}</td>
+                        <td className="py-3 px-2 text-sm">{txn.invoice_number}</td>
+                        <td className="py-3 px-2 text-sm">
+                          ${parseFloat(txn.total_amount).toFixed(2)} {txn.currency}
+                        </td>
+                        <td className="py-3 px-2">
+                          <span className={`inline-block px-2 py-1 text-xs rounded ${
+                            txn.status === 'success' ? 'bg-green-100 text-green-800' : 'bg-red-100 text-red-800'
+                          }`}>
+                            {txn.status === 'success' ? '✓ Success' : '✗ Failed'}
+                          </span>
+                          {txn.error_message && (
+                            <p className="text-xs text-red-600 mt-1">{txn.error_message}</p>
+                          )}
+                        </td>
+                        <td className="py-3 px-2 text-sm text-gray-600">
+                          {txn.zoho_bill_id || '-'}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* Batch Confirmation Modal */}
+        {showBatchConfirm && (
+          <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center p-4 z-50">
+            <div className="bg-white rounded-lg shadow-2xl max-w-4xl w-full max-h-[90vh] overflow-y-auto">
+              <div className="p-6">
+                <div className="flex justify-between items-center mb-6">
+                  <h2 className="text-2xl font-bold">Confirm Batch Upload</h2>
+                  <button
+                    onClick={() => setShowBatchConfirm(false)}
+                    className="text-gray-500 hover:text-gray-700 text-2xl"
+                  >
+                    ×
+                  </button>
+                </div>
+
+                <p className="text-gray-600 mb-4">
+                  You are about to upload <strong>{batchToUpload.length}</strong> invoice(s) to Zoho Books:
+                </p>
+
+                <div className="space-y-3 mb-6 max-h-96 overflow-y-auto">
+                  {batchToUpload.map((file, index) => (
+                    <div key={file.id} className="p-4 bg-gray-50 rounded-lg border">
                       <div className="flex justify-between items-start">
                         <div className="flex-1">
-                          <p className="font-medium text-sm truncate">{file.file.name}</p>
-                          {file.error && (
-                            <p className="text-xs text-red-600 mt-1">{file.error}</p>
-                          )}
+                          <p className="font-semibold">#{index + 1}: {file.extractedData.vendorName}</p>
+                          <p className="text-sm text-gray-600">
+                            Invoice: {file.extractedData.invoiceNumber} | 
+                            Date: {file.extractedData.invoiceDate} | 
+                            Amount: ${file.extractedData.total?.toFixed(2)} {file.extractedData.currency}
+                          </p>
+                          <p className="text-xs text-gray-500 mt-1">
+                            {file.extractedData.lineItems?.length || 0} line items
+                          </p>
                         </div>
-                        <div className="flex items-center gap-2">
-                          <span className="text-xs px-2 py-1 rounded">
-                            {file.status === 'success' && '✓'}
-                            {file.status === 'error' && '✗'}
-                            {file.status === 'processing' && '⏳'}
-                            {file.status === 'pending' && '⋯'}
-                          </span>
-                          <button
-                            onClick={() => setFiles(prev => prev.filter(f => f.id !== file.id))}
-                            className="text-gray-400 hover:text-red-600 text-lg font-bold"
-                            title="Remove from queue"
-                          >
-                            ×
-                          </button>
-                        </div>
+                        <button
+                          onClick={() => setBatchToUpload(prev => prev.filter(f => f.id !== file.id))}
+                          className="text-red-600 hover:text-red-800 ml-4"
+                          title="Remove from batch"
+                        >
+                          Remove
+                        </button>
                       </div>
                     </div>
                   ))}
                 </div>
-              </div>
-            )}
-          </div>
 
-          {/* Activity Log */}
-          <div className="bg-white rounded-lg shadow-lg p-6">
-            <div className="flex justify-between items-center mb-4">
-              <h2 className="text-xl font-semibold">Activity Log</h2>
-              <button
-                onClick={clearLog}
-                className="text-xs px-3 py-1 bg-gray-100 hover:bg-gray-200 rounded transition"
-              >
-                Clear
-              </button>
-            </div>
-            
-            <div className="space-y-2 max-h-[500px] overflow-y-auto">
-              {activityLog.length === 0 ? (
-                <p className="text-gray-500 text-sm text-center py-8">No activity yet</p>
-              ) : (
-                activityLog.map(entry => (
-                  <div
-                    key={entry.id}
-                    className={`p-3 rounded-lg text-sm ${
-                      entry.type === 'success' ? 'bg-green-50 border-l-4 border-green-500' :
-                      entry.type === 'error' ? 'bg-red-50 border-l-4 border-red-500' :
-                      entry.type === 'warning' ? 'bg-yellow-50 border-l-4 border-yellow-500' :
-                      'bg-blue-50 border-l-4 border-blue-500'
-                    }`}
+                <div className="flex justify-end gap-3">
+                  <button
+                    onClick={() => setShowBatchConfirm(false)}
+                    className="px-6 py-2 border border-gray-300 rounded-lg hover:bg-gray-50 transition"
                   >
-                    <div className="flex justify-between items-start mb-1">
-                      <span className="font-medium">
-                        {entry.type === 'success' && '✓ '}
-                        {entry.type === 'error' && '✗ '}
-                        {entry.type === 'warning' && '⚠ '}
-                        {entry.type === 'info' && 'ℹ '}
-                        {entry.message}
-                      </span>
-                      <span className="text-xs text-gray-500">
-                        {new Date(entry.timestamp).toLocaleTimeString()}
-                      </span>
-                    </div>
-                    {entry.details && (
-                      <pre className="text-xs text-gray-600 mt-2 overflow-x-auto">
-                        {JSON.stringify(entry.details, null, 2)}
-                      </pre>
-                    )}
-                  </div>
-                ))
-              )}
+                    Cancel
+                  </button>
+                  <button
+                    onClick={uploadBatch}
+                    disabled={batchToUpload.length === 0}
+                    className="px-6 py-2 bg-emerald-600 text-white rounded-lg hover:bg-emerald-700 transition disabled:bg-gray-300"
+                  >
+                    Upload {batchToUpload.length} Invoice{batchToUpload.length !== 1 ? 's' : ''} to Zoho Books
+                  </button>
+                </div>
+              </div>
             </div>
           </div>
-        </div>
+        )}
 
         {/* Preview/Edit Modal */}
         {currentPreview && editMode && (
