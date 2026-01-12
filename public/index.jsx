@@ -31,18 +31,22 @@ function InvoiceProcessor() {
         }
         
         // Load GL account mappings
-        const mappingsRes = await fetch('/api/mappings/load');
+        const mappingsRes = await fetch('/api/gl-mappings/get');
         if (mappingsRes.ok) {
           const data = await mappingsRes.json();
           setAccountMappings(data.mappings || {});
         }
         
         // Load cached accounts
-        const accountsRes = await fetch('/api/accounts/cache');
+        const accountsRes = await fetch('/api/accounts/cached');
         if (accountsRes.ok) {
           const cache = await accountsRes.json();
           if (cache.accounts && cache.accounts.length > 0) {
-            setAccounts(cache.accounts);
+            setAccounts(cache.accounts.map(acc => ({
+              account_id: acc.account_id,
+              account_name: acc.account_name,
+              account_type: 'expense'
+            })));
           }
         }
         
@@ -172,23 +176,20 @@ function InvoiceProcessor() {
       .filter(word => word.length > 3);
     
     if (keywords.length > 0) {
-      const newMappings = {};
-      keywords.forEach(keyword => {
-        newMappings[keyword] = accountId;
-      });
+      const keyword = keywords[0]; // Use first significant keyword
       
       // Update local state
-      setAccountMappings(prev => ({ ...prev, ...newMappings }));
+      setAccountMappings(prev => ({ ...prev, [keyword]: accountId }));
       
       // Save to server
       try {
-        await fetch('/api/mappings/save', {
+        await fetch('/api/gl-mappings/save', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ mappings: newMappings })
+          body: JSON.stringify({ keyword, accountId })
         });
       } catch (error) {
-        console.error('Failed to save mappings to server:', error);
+        console.error('Failed to save mapping to server:', error);
       }
     }
   };
@@ -229,7 +230,13 @@ function InvoiceProcessor() {
           accessToken: data.access_token
         };
         setConfig(newConfig);
-        localStorage.setItem('zohoConfig', JSON.stringify(newConfig));
+        
+        // Save to server
+        await fetch('/api/config/save', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(newConfig)
+        });
         
         addToLog('success', '✓ Access token refreshed successfully');
         return data.access_token;
@@ -371,9 +378,7 @@ function InvoiceProcessor() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           vendorName: data.vendorName,
-          organizationId: config.organizationId,
-          accessToken: config.accessToken,
-          apiDomain: config.apiDomain
+          config: config
         })
       });
 
@@ -390,25 +395,13 @@ function InvoiceProcessor() {
       }
 
       if (!vendorResponse.ok) {
-        const errorData = await vendorResponse.json().catch(() => ({}));
-        
-        // Provide specific error messages
-        if (vendorResponse.status === 401) {
-          throw new Error('Access token expired or invalid. Please generate a new token in Settings.');
-        } else if (vendorResponse.status === 400) {
-          throw new Error('Invalid organization ID or access token. Please check your settings.');
-        } else {
-          throw new Error(errorData.error || errorData.details || 'Failed to find/create vendor. Check your Zoho credentials.');
-        }
+        const errorText = await vendorResponse.text();
+        console.error('Vendor error:', errorText);
+        throw new Error(`Failed to find/create vendor: ${errorText}`);
       }
 
       const vendorData = await vendorResponse.json();
-      
-      if (vendorData.created) {
-        addToLog('warning', `⚠ Created new vendor: ${vendorData.vendorName}`);
-      } else {
-        addToLog('success', `✓ Found existing vendor: ${vendorData.vendorName}`);
-      }
+      addToLog('success', `✓ Vendor ready: ${data.vendorName}`);
 
       // Create Bill
       addToLog('info', `Creating bill ${data.invoiceNumber}...`);
@@ -435,25 +428,14 @@ function InvoiceProcessor() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           billData,
-          organizationId: config.organizationId,
-          accessToken: config.accessToken,
-          apiDomain: config.apiDomain
+          config: config
         })
       });
 
       if (!billResponse.ok) {
-        const errorData = await billResponse.json().catch(() => ({}));
-        
-        // Check if it's a duplicate invoice
-        if (billResponse.status === 409) {
-          throw new Error(`Duplicate invoice detected: ${errorData.message || `Invoice ${data.invoiceNumber} already exists for this vendor`}`);
-        } else if (billResponse.status === 401) {
-          throw new Error('Access token expired. Please generate a new token in Settings.');
-        } else if (billResponse.status === 400) {
-          throw new Error(`Invalid bill data: ${errorData.error || errorData.details || 'Please check the invoice details'}`);
-        } else {
-          throw new Error(errorData.error || errorData.details || 'Failed to create bill in Zoho Books');
-        }
+        const errorText = await billResponse.text();
+        console.error('Bill error:', errorText);
+        throw new Error(`Failed to create bill: ${errorText}`);
       }
 
       const billResult = await billResponse.json();
@@ -582,6 +564,21 @@ function InvoiceProcessor() {
           <div className="bg-white rounded-lg shadow-lg p-6 mb-6">
             <h2 className="text-xl font-semibold mb-4">Zoho Books Configuration</h2>
             <div className="space-y-4">
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">
+                  API Domain
+                </label>
+                <input
+                  type="text"
+                  value={config.apiDomain}
+                  onChange={(e) => setConfig({...config, apiDomain: e.target.value})}
+                  className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-emerald-500"
+                  placeholder="https://www.zohoapis.com"
+                />
+                <p className="text-xs text-gray-500 mt-1">
+                  US/Global: https://www.zohoapis.com | Europe: https://www.zohoapis.eu
+                </p>
+              </div>
               <div>
                 <label className="block text-sm font-medium text-gray-700 mb-1">
                   Organization ID
