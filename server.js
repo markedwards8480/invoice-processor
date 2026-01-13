@@ -76,6 +76,70 @@ async function initializeDatabase() {
 
 initializeDatabase();
 
+// Background token refresh - checks every 30 minutes
+let tokenRefreshInterval = null;
+
+async function startTokenRefreshCheck() {
+  // Clear any existing interval
+  if (tokenRefreshInterval) {
+    clearInterval(tokenRefreshInterval);
+  }
+  
+  // Check every 30 minutes
+  tokenRefreshInterval = setInterval(async () => {
+    try {
+      // Load current config
+      const result = await pool.query('SELECT key, value FROM config');
+      const config = {};
+      result.rows.forEach(row => {
+        try {
+          config[row.key] = JSON.parse(row.value);
+        } catch (e) {
+          config[row.key] = row.value;
+        }
+      });
+      
+      // If we have refresh token credentials, refresh the access token
+      if (config.refreshToken && config.clientId && config.clientSecret) {
+        console.log('Background token refresh: Refreshing access token...');
+        
+        const response = await fetch('https://accounts.zoho.com/oauth/v2/token', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+          body: new URLSearchParams({
+            refresh_token: config.refreshToken,
+            client_id: config.clientId,
+            client_secret: config.clientSecret,
+            grant_type: 'refresh_token'
+          })
+        });
+        
+        if (response.ok) {
+          const data = await response.json();
+          if (data.access_token) {
+            // Save new access token
+            await pool.query(
+              'INSERT INTO config (key, value, updated_at) VALUES ($1, $2, CURRENT_TIMESTAMP) ON CONFLICT (key) DO UPDATE SET value = $2, updated_at = CURRENT_TIMESTAMP',
+              ['accessToken', JSON.stringify(data.access_token)]
+            );
+            console.log('Background token refresh: Access token refreshed successfully');
+          }
+        } else {
+          console.error('Background token refresh: Failed to refresh token');
+        }
+      }
+    } catch (error) {
+      console.error('Background token refresh error:', error);
+    }
+  }, 30 * 60 * 1000); // 30 minutes
+}
+
+// Start background refresh after 5 seconds (allow server to fully initialize)
+setTimeout(() => {
+  startTokenRefreshCheck();
+  console.log('Background token refresh started (checks every 30 minutes)');
+}, 5000);
+
 // API endpoint to save configuration
 app.post('/api/config/save', async (req, res) => {
   try {
@@ -236,25 +300,119 @@ app.post('/api/transactions/save', async (req, res) => {
   }
 });
 
-// API endpoint to get transaction history
+// API endpoint to get transaction history with search and filtering
 app.get('/api/transactions/history', async (req, res) => {
   try {
-    const { limit = 50, offset = 0 } = req.query;
+    const { 
+      limit = 100, 
+      offset = 0,
+      search = '',
+      status = '',
+      dateFrom = '',
+      dateTo = '',
+      minAmount = '',
+      maxAmount = ''
+    } = req.query;
     
-    const result = await pool.query(
-      `SELECT id, processed_at, vendor_name, invoice_number, invoice_date, total_amount, currency, status, zoho_bill_id, error_message, file_name
-       FROM transactions 
-       ORDER BY processed_at DESC 
-       LIMIT $1 OFFSET $2`,
-      [limit, offset]
-    );
-
-    const countResult = await pool.query('SELECT COUNT(*) FROM transactions');
+    let query = 'SELECT id, processed_at, vendor_name, invoice_number, invoice_date, total_amount, currency, status, zoho_bill_id, error_message, file_name FROM transactions WHERE 1=1';
+    const params = [];
+    let paramCount = 0;
+    
+    // Search filter (vendor name or invoice number)
+    if (search) {
+      paramCount++;
+      query += ` AND (LOWER(vendor_name) LIKE $${paramCount} OR LOWER(invoice_number) LIKE $${paramCount})`;
+      params.push(`%${search.toLowerCase()}%`);
+    }
+    
+    // Status filter
+    if (status) {
+      paramCount++;
+      query += ` AND status = $${paramCount}`;
+      params.push(status);
+    }
+    
+    // Date range filter
+    if (dateFrom) {
+      paramCount++;
+      query += ` AND processed_at >= $${paramCount}`;
+      params.push(dateFrom);
+    }
+    
+    if (dateTo) {
+      paramCount++;
+      query += ` AND processed_at <= $${paramCount}`;
+      params.push(dateTo + ' 23:59:59');
+    }
+    
+    // Amount range filter
+    if (minAmount) {
+      paramCount++;
+      query += ` AND total_amount >= $${paramCount}`;
+      params.push(parseFloat(minAmount));
+    }
+    
+    if (maxAmount) {
+      paramCount++;
+      query += ` AND total_amount <= $${paramCount}`;
+      params.push(parseFloat(maxAmount));
+    }
+    
+    // Add ordering and pagination
+    query += ` ORDER BY processed_at DESC LIMIT $${paramCount + 1} OFFSET $${paramCount + 2}`;
+    params.push(limit, offset);
+    
+    const result = await pool.query(query, params);
+    
+    // Get total count for pagination
+    let countQuery = 'SELECT COUNT(*) FROM transactions WHERE 1=1';
+    const countParams = [];
+    let countParamCount = 0;
+    
+    if (search) {
+      countParamCount++;
+      countQuery += ` AND (LOWER(vendor_name) LIKE $${countParamCount} OR LOWER(invoice_number) LIKE $${countParamCount})`;
+      countParams.push(`%${search.toLowerCase()}%`);
+    }
+    
+    if (status) {
+      countParamCount++;
+      countQuery += ` AND status = $${countParamCount}`;
+      countParams.push(status);
+    }
+    
+    if (dateFrom) {
+      countParamCount++;
+      countQuery += ` AND processed_at >= $${countParamCount}`;
+      countParams.push(dateFrom);
+    }
+    
+    if (dateTo) {
+      countParamCount++;
+      countQuery += ` AND processed_at <= $${countParamCount}`;
+      countParams.push(dateTo + ' 23:59:59');
+    }
+    
+    if (minAmount) {
+      countParamCount++;
+      countQuery += ` AND total_amount >= $${countParamCount}`;
+      countParams.push(parseFloat(minAmount));
+    }
+    
+    if (maxAmount) {
+      countParamCount++;
+      countQuery += ` AND total_amount <= $${countParamCount}`;
+      countParams.push(parseFloat(maxAmount));
+    }
+    
+    const countResult = await pool.query(countQuery, countParams);
     const totalCount = parseInt(countResult.rows[0].count);
 
     res.json({ 
       transactions: result.rows,
-      total: totalCount
+      total: totalCount,
+      limit: parseInt(limit),
+      offset: parseInt(offset)
     });
   } catch (error) {
     console.error('Error getting transaction history:', error);
