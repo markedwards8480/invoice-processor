@@ -623,7 +623,7 @@ function InvoiceProcessor() {
     }
   };
 
-  // Toggle file selection
+  // Toggle file selection (only for extracted files)
   const toggleFileSelection = (fileId) => {
     setSelectedFiles(prev => {
       const newSet = new Set(prev);
@@ -636,25 +636,28 @@ function InvoiceProcessor() {
     });
   };
 
-  // Select/deselect all
+  // Select/deselect all extracted files
   const toggleSelectAll = () => {
-    const pendingFiles = files.filter(f => f.status === 'pending');
-    if (selectedFiles.size === pendingFiles.length) {
+    const extractedFiles = files.filter(f => f.status === 'extracted');
+    if (selectedFiles.size === extractedFiles.length && extractedFiles.length > 0) {
       setSelectedFiles(new Set());
     } else {
-      setSelectedFiles(new Set(pendingFiles.map(f => f.id)));
+      setSelectedFiles(new Set(extractedFiles.map(f => f.id)));
     }
   };
 
-  // Show batch confirmation modal
+  // Show batch confirmation modal for selected files
   const showBatchConfirmation = () => {
-    const extractedFiles = files.filter(f => f.status === 'extracted');
-    if (extractedFiles.length === 0) {
-      addToLog('warning', 'No invoices ready to upload');
+    const selectedExtractedFiles = files.filter(f => 
+      f.status === 'extracted' && selectedFiles.has(f.id)
+    );
+    
+    if (selectedExtractedFiles.length === 0) {
+      addToLog('warning', 'No invoices selected for upload. Please check the boxes next to the invoices you want to upload.');
       return;
     }
     
-    setBatchToUpload(extractedFiles);
+    setBatchToUpload(selectedExtractedFiles);
     setShowBatchConfirm(true);
   };
 
@@ -678,6 +681,7 @@ function InvoiceProcessor() {
     
     setProcessing(false);
     setBatchToUpload([]);
+    setSelectedFiles(new Set()); // Clear selections after upload
   };
 
   // Update extracted data during edit
@@ -716,14 +720,14 @@ function InvoiceProcessor() {
     }));
   };
 
-  // Process selected files
-  const processSelectedFiles = async () => {
+  // Process all pending files
+  const processAllFiles = async () => {
     setProcessing(true);
     
-    const filesToProcess = files.filter(f => selectedFiles.has(f.id) && f.status === 'pending');
+    const filesToProcess = files.filter(f => f.status === 'pending');
     
     if (filesToProcess.length === 0) {
-      addToLog('warning', 'No files selected for processing');
+      addToLog('warning', 'No pending files to process');
       setProcessing(false);
       return;
     }
@@ -737,11 +741,7 @@ function InvoiceProcessor() {
     }
     
     setProcessing(false);
-    setSelectedFiles(new Set());
-    
-    setTimeout(() => {
-      showBatchConfirmation();
-    }, 500);
+    addToLog('success', `Processed ${filesToProcess.length} invoice(s). Review and select which ones to upload.`);
   };
 
   // Clear activity log
@@ -752,7 +752,6 @@ function InvoiceProcessor() {
     }
   };
 
-  const pendingFiles = files.filter(f => f.status === 'pending');
   const selectedCount = selectedFiles.size;
 
   return (
@@ -953,32 +952,32 @@ function InvoiceProcessor() {
                   <div className="flex justify-between items-center mb-3">
                     <div className="flex items-center gap-2">
                       <h3 className="font-semibold">Queue ({files.length})</h3>
-                      {pendingFiles.length > 0 && (
+                      {files.some(f => f.status === 'extracted') && (
                         <label className="flex items-center gap-1 text-sm cursor-pointer">
                           <input
                             type="checkbox"
-                            checked={selectedFiles.size === pendingFiles.length && pendingFiles.length > 0}
+                            checked={selectedFiles.size === files.filter(f => f.status === 'extracted').length && files.filter(f => f.status === 'extracted').length > 0}
                             onChange={toggleSelectAll}
                             className="rounded"
                           />
-                          <span className="text-gray-600">Select all</span>
+                          <span className="text-gray-600">Select all ready</span>
                         </label>
                       )}
                     </div>
                     <div className="flex gap-2">
                       <button
-                        onClick={processSelectedFiles}
-                        disabled={processing || selectedCount === 0}
+                        onClick={processAllFiles}
+                        disabled={processing || !files.some(f => f.status === 'pending')}
                         className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition disabled:bg-gray-300"
                       >
-                        {processing ? 'Processing...' : selectedCount > 0 ? `Process Selected (${selectedCount})` : 'Process Selected'}
+                        {processing ? 'Processing...' : 'Process All'}
                       </button>
                       <button
                         onClick={showBatchConfirmation}
-                        disabled={processing || files.every(f => f.status !== 'extracted')}
+                        disabled={processing || selectedCount === 0}
                         className="px-4 py-2 bg-emerald-600 text-white rounded-lg hover:bg-emerald-700 transition disabled:bg-gray-300"
                       >
-                        Upload to Zoho
+                        {selectedCount > 0 ? `Upload Selected (${selectedCount})` : 'Upload Selected'}
                       </button>
                     </div>
                   </div>
@@ -998,7 +997,7 @@ function InvoiceProcessor() {
                       >
                         <div className="flex justify-between items-start">
                           <div className="flex items-start gap-2 flex-1">
-                            {file.status === 'pending' && (
+                            {file.status === 'extracted' && (
                               <input
                                 type="checkbox"
                                 checked={selectedFiles.has(file.id)}
