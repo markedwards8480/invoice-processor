@@ -273,15 +273,34 @@ function InvoiceProcessor() {
   };
 
   // Auto-suggest account based on line item description
-  const suggestAccount = (description) => {
+  // Auto-suggest account based on line item description and vendor
+  const suggestAccount = (description, vendorName = '') => {
     const desc = description.toLowerCase();
+    const vendor = vendorName.toLowerCase();
     
+    // PRIORITY 1: Check vendor-specific mappings first (most accurate)
+    if (vendor) {
+      const vendorKey = `${vendor}::${desc}`;
+      if (accountMappings[vendorKey]) {
+        return accountMappings[vendorKey];
+      }
+      
+      // Check if any vendor-specific partial matches exist
+      for (const [key, accountId] of Object.entries(accountMappings)) {
+        if (key.startsWith(vendor + '::') && desc.includes(key.split('::')[1])) {
+          return accountId;
+        }
+      }
+    }
+    
+    // PRIORITY 2: Check general keyword mappings (learned from any vendor)
     for (const [keyword, accountId] of Object.entries(accountMappings)) {
-      if (desc.includes(keyword.toLowerCase())) {
+      if (!keyword.includes('::') && desc.includes(keyword.toLowerCase())) {
         return accountId;
       }
     }
     
+    // PRIORITY 3: Hardcoded keyword matching (fallback)
     const keywords = {
       'shipping': ['shipping', 'freight', 'delivery', 'ship'],
       'fee': ['fee', 'charge', 'service'],
@@ -300,6 +319,7 @@ function InvoiceProcessor() {
       }
     }
     
+    // PRIORITY 4: Default to first expense account
     const expenseAccount = accounts.find(a => 
       a.account_type === 'expense' || 
       a.account_name.toLowerCase().includes('expense')
@@ -308,13 +328,30 @@ function InvoiceProcessor() {
     return expenseAccount?.account_id || '';
   };
 
-  // Save account mapping for future use
-  const saveAccountMapping = async (description, accountId) => {
-    const keywords = description.toLowerCase()
-      .replace(/[^a-z\s]/g, '')
-      .split(' ')
-      .filter(word => word.length > 3);
+  // Save account mapping for future use (vendor-aware)
+  const saveAccountMapping = async (description, accountId, vendorName = '') => {
+    const desc = description.toLowerCase().replace(/[^a-z\s]/g, '').trim();
+    const vendor = vendorName.toLowerCase().replace(/[^a-z\s]/g, '').trim();
     
+    // Save vendor-specific mapping (highest priority)
+    if (vendor && desc) {
+      const vendorKey = `${vendor}::${desc}`;
+      
+      setAccountMappings(prev => ({ ...prev, [vendorKey]: accountId }));
+      
+      try {
+        await fetch('/api/gl-mappings/save', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ keyword: vendorKey, accountId })
+        });
+      } catch (error) {
+        console.error('Failed to save vendor-specific mapping:', error);
+      }
+    }
+    
+    // Also save general keyword mapping (lower priority fallback)
+    const keywords = desc.split(' ').filter(word => word.length > 3);
     if (keywords.length > 0) {
       const keyword = keywords[0];
       
@@ -327,7 +364,7 @@ function InvoiceProcessor() {
           body: JSON.stringify({ keyword, accountId })
         });
       } catch (error) {
-        console.error('Failed to save mapping to server:', error);
+        console.error('Failed to save general mapping:', error);
       }
     }
   };
@@ -458,7 +495,7 @@ function InvoiceProcessor() {
       
       if (extractedData.lineItems && accounts.length > 0) {
         extractedData.lineItems = extractedData.lineItems.map(item => {
-          const suggestedAccountId = item.account_id || suggestAccount(item.description);
+          const suggestedAccountId = item.account_id || suggestAccount(item.description, extractedData.vendorName);
           const suggestedAccount = accounts.find(a => a.account_id === suggestedAccountId);
           
           return {
@@ -575,6 +612,16 @@ function InvoiceProcessor() {
       const billResult = await billResponse.json();
       
       addToLog('success', `✓ Invoice ${data.invoiceNumber} uploaded successfully! Amount: $${data.total?.toFixed(2) || '0.00'} ${data.currency || 'CAD'}`);
+
+      // AUTOMATIC LEARNING: Save GL code mappings for successful uploads
+      if (data.lineItems && data.lineItems.length > 0) {
+        for (const item of data.lineItems) {
+          if (item.account_id && item.description) {
+            await saveAccountMapping(item.description, item.account_id, data.vendorName);
+          }
+        }
+        addToLog('info', `Learned ${data.lineItems.length} GL code mapping(s) from ${data.vendorName}`);
+      }
 
       await saveTransaction(data, 'success', billResult.bill?.bill_id, null, fileObj.file.name);
 
@@ -1546,7 +1593,7 @@ function InvoiceProcessor() {
                                             updateLineItem(index, 'account_search', acc.account_name);
                                             updateLineItem(index, 'account_dropdown_open', false);
                                             if (acc.account_id) {
-                                              saveAccountMapping(item.description, acc.account_id);
+                                              saveAccountMapping(item.description, acc.account_id, currentPreview.extractedData.vendorName);
                                             }
                                           }}
                                           className="px-3 py-2 hover:bg-emerald-50 cursor-pointer text-sm border-b last:border-b-0"
