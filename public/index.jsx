@@ -1312,7 +1312,7 @@ function InvoiceProcessor() {
                           <td className="py-3 px-2 text-sm">
                             {txn.zoho_bill_id ? (
                               <a
-                                href={`${config.apiDomain.replace('api.', '')}/app#/bills/${txn.zoho_bill_id}`}
+                                href={`https://books.zoho.com/app#/bills/${txn.zoho_bill_id}`}
                                 target="_blank"
                                 rel="noopener noreferrer"
                                 className="text-blue-600 hover:text-blue-800 underline"
