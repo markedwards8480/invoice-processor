@@ -20,9 +20,20 @@ function InvoiceProcessor() {
   const [accountMappings, setAccountMappings] = useState({});
   const [activeTab, setActiveTab] = useState('upload');
   const [transactions, setTransactions] = useState([]);
+  const [transactionTotal, setTransactionTotal] = useState(0);
+  const [transactionOffset, setTransactionOffset] = useState(0);
+  const [transactionLimit, setTransactionLimit] = useState(50);
   const [showBatchConfirm, setShowBatchConfirm] = useState(false);
   const [batchToUpload, setBatchToUpload] = useState([]);
   const [selectedFiles, setSelectedFiles] = useState(new Set());
+  
+  // Transaction history filters
+  const [searchTerm, setSearchTerm] = useState('');
+  const [statusFilter, setStatusFilter] = useState('');
+  const [dateFrom, setDateFrom] = useState('');
+  const [dateTo, setDateTo] = useState('');
+  const [minAmount, setMinAmount] = useState('');
+  const [maxAmount, setMaxAmount] = useState('');
 
   // Load config from server
   useEffect(() => {
@@ -67,17 +78,101 @@ function InvoiceProcessor() {
     loadServerData();
   }, []);
 
-  // Load transaction history
-  const loadTransactionHistory = async () => {
+  // Load transaction history with filters
+  const loadTransactionHistory = async (resetOffset = false) => {
     try {
-      const response = await fetch('/api/transactions/history?limit=100');
+      const offset = resetOffset ? 0 : transactionOffset;
+      
+      const params = new URLSearchParams({
+        limit: transactionLimit,
+        offset: offset
+      });
+      
+      if (searchTerm) params.append('search', searchTerm);
+      if (statusFilter) params.append('status', statusFilter);
+      if (dateFrom) params.append('dateFrom', dateFrom);
+      if (dateTo) params.append('dateTo', dateTo);
+      if (minAmount) params.append('minAmount', minAmount);
+      if (maxAmount) params.append('maxAmount', maxAmount);
+      
+      const response = await fetch(`/api/transactions/history?${params}`);
       if (response.ok) {
         const data = await response.json();
-        setTransactions(data.transactions || []);
+        if (resetOffset) {
+          setTransactions(data.transactions || []);
+          setTransactionOffset(0);
+        } else {
+          setTransactions(prev => [...prev, ...(data.transactions || [])]);
+        }
+        setTransactionTotal(data.total || 0);
       }
     } catch (error) {
       console.error('Error loading transaction history:', error);
     }
+  };
+  
+  // Search/filter transactions
+  const searchTransactions = () => {
+    loadTransactionHistory(true);
+  };
+  
+  // Load more transactions
+  const loadMoreTransactions = () => {
+    setTransactionOffset(prev => prev + transactionLimit);
+  };
+  
+  // Trigger load more when offset changes
+  useEffect(() => {
+    if (transactionOffset > 0) {
+      loadTransactionHistory(false);
+    }
+  }, [transactionOffset]);
+  
+  // Export transactions to CSV
+  const exportToCSV = () => {
+    const headers = ['Date', 'Time', 'Vendor', 'Invoice #', 'Invoice Date', 'Amount', 'Currency', 'Status', 'Zoho Bill ID', 'Error'];
+    const rows = transactions.map(txn => [
+      new Date(txn.processed_at).toLocaleDateString(),
+      new Date(txn.processed_at).toLocaleTimeString(),
+      txn.vendor_name,
+      txn.invoice_number,
+      txn.invoice_date || '',
+      txn.total_amount,
+      txn.currency,
+      txn.status,
+      txn.zoho_bill_id || '',
+      txn.error_message || ''
+    ]);
+    
+    const csvContent = [
+      headers.join(','),
+      ...rows.map(row => row.map(cell => `"${cell}"`).join(','))
+    ].join('\n');
+    
+    const blob = new Blob([csvContent], { type: 'text/csv' });
+    const url = window.URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `invoice-transactions-${new Date().toISOString().split('T')[0]}.csv`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    window.URL.revokeObjectURL(url);
+    
+    addToLog('success', `Exported ${transactions.length} transactions to CSV`);
+  };
+  
+  // Clear filters
+  const clearFilters = () => {
+    setSearchTerm('');
+    setStatusFilter('');
+    setDateFrom('');
+    setDateTo('');
+    setMinAmount('');
+    setMaxAmount('');
+    setTransactionOffset(0);
+    // Reload without filters
+    setTimeout(() => loadTransactionHistory(true), 100);
   };
 
   // Check for duplicates
@@ -1009,55 +1104,196 @@ function InvoiceProcessor() {
         ) : (
           /* Transaction History Tab */
           <div className="bg-white rounded-lg shadow-lg p-6">
-            <h2 className="text-xl font-semibold mb-4">Transaction History</h2>
+            <div className="flex justify-between items-center mb-6">
+              <h2 className="text-xl font-semibold">Transaction History</h2>
+              <button
+                onClick={exportToCSV}
+                disabled={transactions.length === 0}
+                className="px-4 py-2 bg-emerald-600 text-white rounded-lg hover:bg-emerald-700 transition disabled:bg-gray-300"
+              >
+                📥 Export to CSV
+              </button>
+            </div>
+            
+            {/* Search and Filters */}
+            <div className="mb-6 p-4 bg-gray-50 rounded-lg">
+              <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-4">
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">
+                    Search (Vendor or Invoice #)
+                  </label>
+                  <input
+                    type="text"
+                    value={searchTerm}
+                    onChange={(e) => setSearchTerm(e.target.value)}
+                    onKeyPress={(e) => e.key === 'Enter' && searchTransactions()}
+                    className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-emerald-500"
+                    placeholder="Search..."
+                  />
+                </div>
+                
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">
+                    Status
+                  </label>
+                  <select
+                    value={statusFilter}
+                    onChange={(e) => setStatusFilter(e.target.value)}
+                    className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-emerald-500"
+                  >
+                    <option value="">All</option>
+                    <option value="success">Success</option>
+                    <option value="error">Failed</option>
+                  </select>
+                </div>
+                
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">
+                    Date From
+                  </label>
+                  <input
+                    type="date"
+                    value={dateFrom}
+                    onChange={(e) => setDateFrom(e.target.value)}
+                    className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-emerald-500"
+                  />
+                </div>
+                
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">
+                    Date To
+                  </label>
+                  <input
+                    type="date"
+                    value={dateTo}
+                    onChange={(e) => setDateTo(e.target.value)}
+                    className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-emerald-500"
+                  />
+                </div>
+                
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">
+                    Min Amount
+                  </label>
+                  <input
+                    type="number"
+                    step="0.01"
+                    value={minAmount}
+                    onChange={(e) => setMinAmount(e.target.value)}
+                    className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-emerald-500"
+                    placeholder="0.00"
+                  />
+                </div>
+                
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">
+                    Max Amount
+                  </label>
+                  <input
+                    type="number"
+                    step="0.01"
+                    value={maxAmount}
+                    onChange={(e) => setMaxAmount(e.target.value)}
+                    className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-emerald-500"
+                    placeholder="0.00"
+                  />
+                </div>
+              </div>
+              
+              <div className="flex gap-3">
+                <button
+                  onClick={searchTransactions}
+                  className="px-6 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition"
+                >
+                  🔍 Search
+                </button>
+                <button
+                  onClick={clearFilters}
+                  className="px-6 py-2 bg-gray-300 text-gray-700 rounded-lg hover:bg-gray-400 transition"
+                >
+                  Clear Filters
+                </button>
+              </div>
+            </div>
             
             {transactions.length === 0 ? (
-              <p className="text-gray-500 text-center py-12">No transactions yet. Upload and process invoices to see them here.</p>
+              <p className="text-gray-500 text-center py-12">
+                {searchTerm || statusFilter || dateFrom || dateTo || minAmount || maxAmount 
+                  ? 'No transactions match your search criteria.'
+                  : 'No transactions yet. Upload and process invoices to see them here.'}
+              </p>
             ) : (
-              <div className="overflow-x-auto">
-                <table className="w-full">
-                  <thead>
-                    <tr className="border-b">
-                      <th className="text-left py-3 px-2">Date</th>
-                      <th className="text-left py-3 px-2">Vendor</th>
-                      <th className="text-left py-3 px-2">Invoice #</th>
-                      <th className="text-left py-3 px-2">Amount</th>
-                      <th className="text-left py-3 px-2">Status</th>
-                      <th className="text-left py-3 px-2">Zoho Bill ID</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {transactions.map(txn => (
-                      <tr key={txn.id} className="border-b hover:bg-gray-50">
-                        <td className="py-3 px-2 text-sm">
-                          {new Date(txn.processed_at).toLocaleDateString()} <br/>
-                          <span className="text-xs text-gray-500">
-                            {new Date(txn.processed_at).toLocaleTimeString()}
-                          </span>
-                        </td>
-                        <td className="py-3 px-2 text-sm font-medium">{txn.vendor_name}</td>
-                        <td className="py-3 px-2 text-sm">{txn.invoice_number}</td>
-                        <td className="py-3 px-2 text-sm">
-                          ${parseFloat(txn.total_amount).toFixed(2)} {txn.currency}
-                        </td>
-                        <td className="py-3 px-2">
-                          <span className={`inline-block px-2 py-1 text-xs rounded ${
-                            txn.status === 'success' ? 'bg-green-100 text-green-800' : 'bg-red-100 text-red-800'
-                          }`}>
-                            {txn.status === 'success' ? '✓ Success' : '✗ Failed'}
-                          </span>
-                          {txn.error_message && (
-                            <p className="text-xs text-red-600 mt-1">{txn.error_message}</p>
-                          )}
-                        </td>
-                        <td className="py-3 px-2 text-sm text-gray-600">
-                          {txn.zoho_bill_id || '-'}
-                        </td>
+              <>
+                <div className="mb-4 text-sm text-gray-600">
+                  Showing {transactions.length} of {transactionTotal} transactions
+                </div>
+                <div className="overflow-x-auto">
+                  <table className="w-full">
+                    <thead>
+                      <tr className="border-b">
+                        <th className="text-left py-3 px-2">Date</th>
+                        <th className="text-left py-3 px-2">Vendor</th>
+                        <th className="text-left py-3 px-2">Invoice #</th>
+                        <th className="text-left py-3 px-2">Amount</th>
+                        <th className="text-left py-3 px-2">Status</th>
+                        <th className="text-left py-3 px-2">Zoho Bill ID</th>
                       </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
+                    </thead>
+                    <tbody>
+                      {transactions.map(txn => (
+                        <tr key={txn.id} className="border-b hover:bg-gray-50">
+                          <td className="py-3 px-2 text-sm">
+                            {new Date(txn.processed_at).toLocaleDateString()} <br/>
+                            <span className="text-xs text-gray-500">
+                              {new Date(txn.processed_at).toLocaleTimeString()}
+                            </span>
+                          </td>
+                          <td className="py-3 px-2 text-sm font-medium">{txn.vendor_name}</td>
+                          <td className="py-3 px-2 text-sm">{txn.invoice_number}</td>
+                          <td className="py-3 px-2 text-sm">
+                            ${parseFloat(txn.total_amount).toFixed(2)} {txn.currency}
+                          </td>
+                          <td className="py-3 px-2">
+                            <span className={`inline-block px-2 py-1 text-xs rounded ${
+                              txn.status === 'success' ? 'bg-green-100 text-green-800' : 'bg-red-100 text-red-800'
+                            }`}>
+                              {txn.status === 'success' ? '✓ Success' : '✗ Failed'}
+                            </span>
+                            {txn.error_message && (
+                              <p className="text-xs text-red-600 mt-1">{txn.error_message}</p>
+                            )}
+                          </td>
+                          <td className="py-3 px-2 text-sm">
+                            {txn.zoho_bill_id ? (
+                              <a
+                                href={`${config.apiDomain.replace('api.', '')}/app#/bills/${txn.zoho_bill_id}`}
+                                target="_blank"
+                                rel="noopener noreferrer"
+                                className="text-blue-600 hover:text-blue-800 underline"
+                              >
+                                {txn.zoho_bill_id}
+                              </a>
+                            ) : (
+                              <span className="text-gray-400">-</span>
+                            )}
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+                
+                {transactions.length < transactionTotal && (
+                  <div className="mt-6 text-center">
+                    <button
+                      onClick={loadMoreTransactions}
+                      className="px-6 py-2 bg-gray-200 text-gray-700 rounded-lg hover:bg-gray-300 transition"
+                    >
+                      Load More ({transactionTotal - transactions.length} remaining)
+                    </button>
+                  </div>
+                )}
+              </>
             )}
           </div>
         )}
