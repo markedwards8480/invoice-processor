@@ -480,8 +480,15 @@ app.post('/api/zoho/accounts', async (req, res) => {
     }
 
     const data = await response.json();
-    console.log('Successfully fetched accounts:', data.chartofaccounts?.length || 0);
-    res.json({ accounts: data.chartofaccounts || [] });
+    
+    // Filter to only include expense accounts (for bills)
+    const allAccounts = data.chartofaccounts || [];
+    const expenseAccounts = allAccounts.filter(acc => 
+      acc.account_type && acc.account_type.toLowerCase() === 'expense'
+    );
+    
+    console.log(`Successfully fetched ${allAccounts.length} total accounts, ${expenseAccounts.length} expense accounts`);
+    res.json({ accounts: expenseAccounts });
   } catch (error) {
     console.error('Error fetching accounts:', error);
     res.status(500).json({ error: error.message });
