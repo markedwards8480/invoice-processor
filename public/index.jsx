@@ -18,30 +18,28 @@ function InvoiceProcessor() {
   const [editMode, setEditMode] = useState(false);
   const [accounts, setAccounts] = useState([]);
   const [accountMappings, setAccountMappings] = useState({});
-  const [activeTab, setActiveTab] = useState('upload'); // 'upload' or 'history'
+  const [activeTab, setActiveTab] = useState('upload');
   const [transactions, setTransactions] = useState([]);
   const [showBatchConfirm, setShowBatchConfirm] = useState(false);
   const [batchToUpload, setBatchToUpload] = useState([]);
+  const [selectedFiles, setSelectedFiles] = useState(new Set());
 
   // Load config from server
   useEffect(() => {
     const loadServerData = async () => {
       try {
-        // Load configuration
         const configRes = await fetch('/api/config/load');
         if (configRes.ok) {
           const serverConfig = await configRes.json();
           setConfig(serverConfig);
         }
         
-        // Load GL account mappings
         const mappingsRes = await fetch('/api/gl-mappings/get');
         if (mappingsRes.ok) {
           const data = await mappingsRes.json();
           setAccountMappings(data.mappings || {});
         }
         
-        // Load cached accounts
         const accountsRes = await fetch('/api/accounts/cached');
         if (accountsRes.ok) {
           const cache = await accountsRes.json();
@@ -54,13 +52,11 @@ function InvoiceProcessor() {
           }
         }
         
-        // Load activity log from localStorage (keep this local per user)
         const savedLog = localStorage.getItem('activityLog');
         if (savedLog) {
           setActivityLog(JSON.parse(savedLog));
         }
 
-        // Load transaction history
         loadTransactionHistory();
       } catch (error) {
         console.error('Error loading server data:', error);
@@ -84,6 +80,16 @@ function InvoiceProcessor() {
     }
   };
 
+  // Check for duplicates
+  const checkDuplicate = (invoiceData) => {
+    const duplicate = transactions.find(txn => 
+      txn.vendor_name.toLowerCase() === invoiceData.vendorName.toLowerCase() &&
+      txn.invoice_number === invoiceData.invoiceNumber &&
+      Math.abs(parseFloat(txn.total_amount) - parseFloat(invoiceData.total)) < 0.01
+    );
+    return duplicate;
+  };
+
   // Save transaction to ledger
   const saveTransaction = async (invoiceData, status, zohoBillId = null, errorMessage = null, fileName = '') => {
     try {
@@ -96,7 +102,7 @@ function InvoiceProcessor() {
           invoiceDate: invoiceData.invoiceDate,
           totalAmount: invoiceData.total,
           currency: invoiceData.currency || 'CAD',
-          status: status, // 'success' or 'error'
+          status: status,
           zohoBillId: zohoBillId,
           extractedData: invoiceData,
           errorMessage: errorMessage,
@@ -104,7 +110,6 @@ function InvoiceProcessor() {
         })
       });
       
-      // Reload transaction history
       loadTransactionHistory();
     } catch (error) {
       console.error('Error saving transaction:', error);
@@ -123,7 +128,6 @@ function InvoiceProcessor() {
       if (response.ok) {
         setShowSettings(false);
         addToLog('success', 'Settings saved successfully');
-        // Fetch accounts after saving config
         fetchAccounts();
       } else {
         addToLog('error', 'Failed to save settings');
@@ -160,7 +164,6 @@ function InvoiceProcessor() {
       const loadedAccounts = data.accounts || [];
       setAccounts(loadedAccounts);
       
-      // Cache to server
       await fetch('/api/accounts/cache', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -178,14 +181,12 @@ function InvoiceProcessor() {
   const suggestAccount = (description) => {
     const desc = description.toLowerCase();
     
-    // Check saved mappings first
     for (const [keyword, accountId] of Object.entries(accountMappings)) {
       if (desc.includes(keyword.toLowerCase())) {
         return accountId;
       }
     }
     
-    // Default keyword matching
     const keywords = {
       'shipping': ['shipping', 'freight', 'delivery', 'ship'],
       'fee': ['fee', 'charge', 'service'],
@@ -196,7 +197,6 @@ function InvoiceProcessor() {
     
     for (const [category, terms] of Object.entries(keywords)) {
       if (terms.some(term => desc.includes(term))) {
-        // Find matching account
         const account = accounts.find(a => 
           a.account_name.toLowerCase().includes(category) ||
           a.account_name.toLowerCase().includes(terms[0])
@@ -205,7 +205,6 @@ function InvoiceProcessor() {
       }
     }
     
-    // Return first expense account as fallback
     const expenseAccount = accounts.find(a => 
       a.account_type === 'expense' || 
       a.account_name.toLowerCase().includes('expense')
@@ -216,19 +215,16 @@ function InvoiceProcessor() {
 
   // Save account mapping for future use
   const saveAccountMapping = async (description, accountId) => {
-    // Extract key terms from description
     const keywords = description.toLowerCase()
       .replace(/[^a-z\s]/g, '')
       .split(' ')
       .filter(word => word.length > 3);
     
     if (keywords.length > 0) {
-      const keyword = keywords[0]; // Use first significant keyword
+      const keyword = keywords[0];
       
-      // Update local state
       setAccountMappings(prev => ({ ...prev, [keyword]: accountId }));
       
-      // Save to server
       try {
         await fetch('/api/gl-mappings/save', {
           method: 'POST',
@@ -271,14 +267,12 @@ function InvoiceProcessor() {
       const data = await response.json();
       
       if (data.access_token) {
-        // Update config with new access token
         const newConfig = {
           ...config,
           accessToken: data.access_token
         };
         setConfig(newConfig);
         
-        // Save to server
         await fetch('/api/config/save', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -301,12 +295,12 @@ function InvoiceProcessor() {
     const entry = {
       id: Date.now(),
       timestamp: new Date().toISOString(),
-      type, // success, error, info, warning
+      type,
       message,
       details
     };
     
-    const newLog = [entry, ...activityLog].slice(0, 100); // Keep last 100 entries
+    const newLog = [entry, ...activityLog].slice(0, 100);
     setActivityLog(newLog);
     localStorage.setItem('activityLog', JSON.stringify(newLog));
   };
@@ -317,9 +311,10 @@ function InvoiceProcessor() {
     const newFiles = selectedFiles.map(file => ({
       id: Date.now() + Math.random(),
       file,
-      status: 'pending', // pending, processing, success, error
+      status: 'pending',
       extractedData: null,
-      error: null
+      error: null,
+      isDuplicate: false
     }));
     
     setFiles([...files, ...newFiles]);
@@ -360,11 +355,12 @@ function InvoiceProcessor() {
   // Process a single invoice
   const processSingleInvoice = async (fileObj) => {
     try {
-      // Extract data
       addToLog('info', `Extracting data from ${fileObj.file.name}...`);
       const extractedData = await extractInvoiceData(fileObj);
       
-      // Auto-suggest accounts for each line item
+      // Check for duplicate
+      const duplicate = checkDuplicate(extractedData);
+      
       if (extractedData.lineItems && accounts.length > 0) {
         extractedData.lineItems = extractedData.lineItems.map(item => {
           const suggestedAccountId = item.account_id || suggestAccount(item.description);
@@ -379,16 +375,22 @@ function InvoiceProcessor() {
         });
       }
       
-      // Update file with extracted data
       const updatedFile = {
         ...fileObj,
         extractedData,
-        status: 'extracted'
+        status: 'extracted',
+        isDuplicate: !!duplicate,
+        duplicateInfo: duplicate
       };
       
       setFiles(prev => prev.map(f => f.id === fileObj.id ? updatedFile : f));
       
-      addToLog('success', `Data extracted from ${fileObj.file.name}`);
+      if (duplicate) {
+        addToLog('warning', `⚠️ Possible duplicate: ${fileObj.file.name} matches invoice uploaded on ${new Date(duplicate.processed_at).toLocaleDateString()}`);
+      } else {
+        addToLog('success', `Data extracted from ${fileObj.file.name}`);
+      }
+      
       return updatedFile;
       
     } catch (error) {
@@ -415,7 +417,6 @@ function InvoiceProcessor() {
     try {
       addToLog('info', `Searching for vendor: ${data.vendorName}...`);
       
-      // Search/Create Vendor
       const vendorResponse = await fetch('/api/zoho/vendor', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -425,12 +426,10 @@ function InvoiceProcessor() {
         })
       });
 
-      // Auto-retry with refreshed token on 401
       if (vendorResponse.status === 401 && retryCount === 0) {
         addToLog('warning', 'Access token expired, refreshing...');
         const newToken = await refreshAccessToken();
         if (newToken) {
-          // Retry with new token
           return uploadToZoho(fileObj, 1);
         } else {
           throw new Error('Access token expired. Please update your token in Settings.');
@@ -439,14 +438,12 @@ function InvoiceProcessor() {
 
       if (!vendorResponse.ok) {
         const errorText = await vendorResponse.text();
-        console.error('Vendor error:', errorText);
         throw new Error(`Failed to find/create vendor: ${errorText}`);
       }
 
       const vendorData = await vendorResponse.json();
       addToLog('success', `✓ Vendor ready: ${data.vendorName}`);
 
-      // Create Bill
       addToLog('info', `Creating bill ${data.invoiceNumber}...`);
       
       const billData = {
@@ -477,7 +474,6 @@ function InvoiceProcessor() {
 
       if (!billResponse.ok) {
         const errorText = await billResponse.text();
-        console.error('Bill error:', errorText);
         throw new Error(`Failed to create bill: ${errorText}`);
       }
 
@@ -485,19 +481,28 @@ function InvoiceProcessor() {
       
       addToLog('success', `✓ Invoice ${data.invoiceNumber} uploaded successfully! Amount: $${data.total?.toFixed(2) || '0.00'} ${data.currency || 'CAD'}`);
 
-      // Save to transaction ledger
       await saveTransaction(data, 'success', billResult.bill?.bill_id, null, fileObj.file.name);
 
       return billResult;
       
     } catch (error) {
       addToLog('error', `✗ Failed to upload ${data.invoiceNumber}: ${error.message}`);
-      
-      // Save failed transaction to ledger
       await saveTransaction(data, 'error', null, error.message, fileObj.file.name);
-      
       throw error;
     }
+  };
+
+  // Save changes without uploading
+  const saveChanges = () => {
+    if (!currentPreview) return;
+    
+    setFiles(prev => prev.map(f => 
+      f.id === currentPreview.id ? currentPreview : f
+    ));
+    
+    addToLog('success', `Changes saved for ${currentPreview.extractedData.invoiceNumber}`);
+    setCurrentPreview(null);
+    setEditMode(false);
   };
 
   // Process current preview (single invoice)
@@ -518,9 +523,31 @@ function InvoiceProcessor() {
       ));
     } finally {
       setProcessing(false);
-      // Always close modal after upload attempt
       setCurrentPreview(null);
       setEditMode(false);
+    }
+  };
+
+  // Toggle file selection
+  const toggleFileSelection = (fileId) => {
+    setSelectedFiles(prev => {
+      const newSet = new Set(prev);
+      if (newSet.has(fileId)) {
+        newSet.delete(fileId);
+      } else {
+        newSet.add(fileId);
+      }
+      return newSet;
+    });
+  };
+
+  // Select/deselect all
+  const toggleSelectAll = () => {
+    const pendingFiles = files.filter(f => f.status === 'pending');
+    if (selectedFiles.size === pendingFiles.length) {
+      setSelectedFiles(new Set());
+    } else {
+      setSelectedFiles(new Set(pendingFiles.map(f => f.id)));
     }
   };
 
@@ -578,7 +605,6 @@ function InvoiceProcessor() {
       )
     };
     
-    // Recalculate subtotal and total
     const newSubtotal = updatedData.lineItems.reduce((sum, item) => {
       const amount = (parseFloat(item.quantity) || 0) * (parseFloat(item.rate) || 0);
       return sum + amount;
@@ -595,30 +621,29 @@ function InvoiceProcessor() {
     }));
   };
 
-  // Process all pending files
-  const processAllFiles = async () => {
+  // Process selected files
+  const processSelectedFiles = async () => {
     setProcessing(true);
     
-    const pendingFiles = files.filter(f => f.status === 'pending');
+    const filesToProcess = files.filter(f => selectedFiles.has(f.id) && f.status === 'pending');
     
-    if (pendingFiles.length === 0) {
-      addToLog('warning', 'No pending files to process');
+    if (filesToProcess.length === 0) {
+      addToLog('warning', 'No files selected for processing');
       setProcessing(false);
       return;
     }
     
-    // Process all files first
-    for (const file of pendingFiles) {
+    for (const file of filesToProcess) {
       try {
         await processSingleInvoice(file);
       } catch (error) {
-        // Error already handled in processSingleInvoice
+        // Error already handled
       }
     }
     
     setProcessing(false);
+    setSelectedFiles(new Set());
     
-    // Show batch confirmation after all are processed
     setTimeout(() => {
       showBatchConfirmation();
     }, 500);
@@ -631,6 +656,9 @@ function InvoiceProcessor() {
       localStorage.removeItem('activityLog');
     }
   };
+
+  const pendingFiles = files.filter(f => f.status === 'pending');
+  const selectedCount = selectedFiles.size;
 
   return (
     <div className="min-h-screen bg-gradient-to-br from-emerald-50 to-teal-100 p-6">
@@ -828,14 +856,27 @@ function InvoiceProcessor() {
               {files.length > 0 && (
                 <div className="mt-6">
                   <div className="flex justify-between items-center mb-3">
-                    <h3 className="font-semibold">Queue ({files.length})</h3>
+                    <div className="flex items-center gap-2">
+                      <h3 className="font-semibold">Queue ({files.length})</h3>
+                      {pendingFiles.length > 0 && (
+                        <label className="flex items-center gap-1 text-sm cursor-pointer">
+                          <input
+                            type="checkbox"
+                            checked={selectedFiles.size === pendingFiles.length && pendingFiles.length > 0}
+                            onChange={toggleSelectAll}
+                            className="rounded"
+                          />
+                          <span className="text-gray-600">Select all</span>
+                        </label>
+                      )}
+                    </div>
                     <div className="flex gap-2">
                       <button
-                        onClick={processAllFiles}
-                        disabled={processing || files.every(f => f.status !== 'pending')}
+                        onClick={processSelectedFiles}
+                        disabled={processing || selectedCount === 0}
                         className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition disabled:bg-gray-300"
                       >
-                        {processing ? 'Processing...' : 'Process All'}
+                        {processing ? 'Processing...' : selectedCount > 0 ? `Process Selected (${selectedCount})` : 'Process Selected'}
                       </button>
                       <button
                         onClick={showBatchConfirmation}
@@ -854,22 +895,40 @@ function InvoiceProcessor() {
                         className={`p-3 rounded-lg border ${
                           file.status === 'success' ? 'bg-green-50 border-green-200' :
                           file.status === 'error' ? 'bg-red-50 border-red-200' :
+                          file.status === 'extracted' && file.isDuplicate ? 'bg-yellow-50 border-yellow-400' :
                           file.status === 'extracted' ? 'bg-blue-50 border-blue-200' :
                           file.status === 'processing' ? 'bg-yellow-50 border-yellow-200' :
                           'bg-gray-50 border-gray-200'
                         }`}
                       >
                         <div className="flex justify-between items-start">
-                          <div className="flex-1">
-                            <p className="font-medium text-sm truncate">{file.file.name}</p>
-                            {file.extractedData && (
-                              <p className="text-xs text-gray-600 mt-1">
-                                {file.extractedData.vendorName} | Invoice #{file.extractedData.invoiceNumber} | ${file.extractedData.total?.toFixed(2)}
-                              </p>
+                          <div className="flex items-start gap-2 flex-1">
+                            {file.status === 'pending' && (
+                              <input
+                                type="checkbox"
+                                checked={selectedFiles.has(file.id)}
+                                onChange={() => toggleFileSelection(file.id)}
+                                className="mt-1 rounded"
+                              />
                             )}
-                            {file.error && (
-                              <p className="text-xs text-red-600 mt-1">{file.error}</p>
-                            )}
+                            <div className="flex-1">
+                              <p className="font-medium text-sm truncate">{file.file.name}</p>
+                              {file.extractedData && (
+                                <>
+                                  <p className="text-xs text-gray-600 mt-1">
+                                    {file.extractedData.vendorName} | Invoice #{file.extractedData.invoiceNumber} | ${file.extractedData.total?.toFixed(2)}
+                                  </p>
+                                  {file.isDuplicate && (
+                                    <p className="text-xs text-yellow-700 font-medium mt-1">
+                                      ⚠️ Possible duplicate - uploaded {new Date(file.duplicateInfo.processed_at).toLocaleDateString()}
+                                    </p>
+                                  )}
+                                </>
+                              )}
+                              {file.error && (
+                                <p className="text-xs text-red-600 mt-1">{file.error}</p>
+                              )}
+                            </div>
                           </div>
                           <div className="flex items-center gap-2">
                             <span className="text-xs px-2 py-1 rounded">
@@ -1024,7 +1083,12 @@ function InvoiceProcessor() {
 
                 <div className="space-y-3 mb-6 max-h-96 overflow-y-auto">
                   {batchToUpload.map((file, index) => (
-                    <div key={file.id} className="p-4 bg-gray-50 rounded-lg border">
+                    <div 
+                      key={file.id} 
+                      className={`p-4 rounded-lg border ${
+                        file.isDuplicate ? 'bg-yellow-50 border-yellow-400' : 'bg-gray-50 border-gray-200'
+                      }`}
+                    >
                       <div className="flex justify-between items-start">
                         <div className="flex-1">
                           <p className="font-semibold">#{index + 1}: {file.extractedData.vendorName}</p>
@@ -1036,6 +1100,11 @@ function InvoiceProcessor() {
                           <p className="text-xs text-gray-500 mt-1">
                             {file.extractedData.lineItems?.length || 0} line items
                           </p>
+                          {file.isDuplicate && (
+                            <p className="text-xs text-yellow-700 font-bold mt-1">
+                              ⚠️ WARNING: Possible duplicate - already uploaded on {new Date(file.duplicateInfo.processed_at).toLocaleDateString()}
+                            </p>
+                          )}
                         </div>
                         <button
                           onClick={() => setBatchToUpload(prev => prev.filter(f => f.id !== file.id))}
@@ -1083,6 +1152,17 @@ function InvoiceProcessor() {
                     ×
                   </button>
                 </div>
+
+                {currentPreview.isDuplicate && (
+                  <div className="mb-4 p-4 bg-yellow-50 border-l-4 border-yellow-400 rounded">
+                    <p className="font-bold text-yellow-800">⚠️ Possible Duplicate Detected</p>
+                    <p className="text-sm text-yellow-700 mt-1">
+                      This invoice matches one already uploaded on {new Date(currentPreview.duplicateInfo.processed_at).toLocaleDateString()} 
+                      (Vendor: {currentPreview.duplicateInfo.vendor_name}, Invoice: {currentPreview.duplicateInfo.invoice_number}, 
+                      Amount: ${parseFloat(currentPreview.duplicateInfo.total_amount).toFixed(2)})
+                    </p>
+                  </div>
+                )}
 
                 <div className="space-y-4">
                   {/* Vendor Info */}
@@ -1299,6 +1379,12 @@ function InvoiceProcessor() {
                     className="px-6 py-2 border border-gray-300 rounded-lg hover:bg-gray-50 transition"
                   >
                     Cancel
+                  </button>
+                  <button
+                    onClick={saveChanges}
+                    className="px-6 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition"
+                  >
+                    Save Changes
                   </button>
                   <button
                     onClick={confirmAndUpload}
