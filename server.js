@@ -250,8 +250,10 @@ async function checkWorkDriveFolder() {
 
     // Filter for PDF files only
     const pdfFiles = files.filter(file => 
-      file.name && file.name.toLowerCase().endsWith('.pdf')
+      file.attributes?.name && file.attributes.name.toLowerCase().endsWith('.pdf')
     );
+
+    console.log(`WorkDrive monitoring: Found ${pdfFiles.length} PDF files`);
 
     if (pdfFiles.length === 0) {
       console.log('WorkDrive monitoring: No new PDF files found');
