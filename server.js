@@ -203,8 +203,8 @@ async function checkWorkDriveFolder() {
 
     console.log('WorkDrive monitoring: Checking for new invoices...');
 
-    // Get folder metadata which should include list of files
-    const response = await fetch(
+    // First get folder metadata to get the files relationship URL
+    const folderResponse = await fetch(
       `https://workdrive.zoho.com/api/v1/files/${workdriveNewInvoicesFolderId}`,
       {
         headers: {
@@ -213,17 +213,39 @@ async function checkWorkDriveFolder() {
       }
     );
 
-    if (!response.ok) {
-      const errorText = await response.text();
-      console.error('WorkDrive monitoring: Failed to fetch files:', response.status, errorText);
+    if (!folderResponse.ok) {
+      const errorText = await folderResponse.text();
+      console.error('WorkDrive monitoring: Failed to fetch folder:', folderResponse.status, errorText);
       return;
     }
 
-    const folderData = await response.json();
-    console.log('WorkDrive monitoring: Folder metadata:', JSON.stringify(folderData));
+    const folderData = await folderResponse.json();
+    const filesUrl = folderData.data?.relationships?.files?.links?.related;
     
-    // The files might be in folderData.data.files or folderData.data.children
-    const files = folderData.data?.files || folderData.data?.children || folderData.data || [];
+    if (!filesUrl) {
+      console.error('WorkDrive monitoring: No files relationship URL found');
+      return;
+    }
+
+    console.log('WorkDrive monitoring: Fetching files from:', filesUrl);
+
+    // Now fetch the actual files using the relationship URL
+    const filesResponse = await fetch(filesUrl, {
+      headers: {
+        'Authorization': `Zoho-oauthtoken ${accessToken}`
+      }
+    });
+
+    if (!filesResponse.ok) {
+      const errorText = await filesResponse.text();
+      console.error('WorkDrive monitoring: Failed to fetch files:', filesResponse.status, errorText);
+      return;
+    }
+
+    const filesData = await filesResponse.json();
+    console.log('WorkDrive monitoring: Files response:', JSON.stringify(filesData));
+    
+    const files = filesData.data || [];
     console.log(`WorkDrive monitoring: Found ${files.length} items in folder`);
 
     // Filter for PDF files only
