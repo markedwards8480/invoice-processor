@@ -824,6 +824,56 @@ app.post('/api/zoho/bill', async (req, res) => {
   }
 });
 
+// Attach file to Zoho Books bill
+app.post('/api/zoho/attach-file', async (req, res) => {
+  try {
+    const { billId, fileName, fileData, config } = req.body;
+    const { organizationId, accessToken, apiDomain } = config;
+    
+    if (!billId || !fileName || !fileData) {
+      return res.status(400).json({ error: 'Missing required fields' });
+    }
+    
+    console.log(`Attaching file ${fileName} to bill ${billId}...`);
+    
+    // Convert base64 to Buffer
+    const fileBuffer = Buffer.from(fileData, 'base64');
+    
+    // Create form data for multipart upload
+    const FormData = require('form-data');
+    const form = new FormData();
+    form.append('attachment', fileBuffer, {
+      filename: fileName,
+      contentType: 'application/pdf'
+    });
+    
+    const response = await fetch(
+      `${apiDomain}/books/v3/bills/${billId}/attachment?organization_id=${organizationId}`,
+      {
+        method: 'POST',
+        headers: {
+          'Authorization': `Zoho-oauthtoken ${accessToken}`,
+          ...form.getHeaders()
+        },
+        body: form
+      }
+    );
+    
+    if (!response.ok) {
+      const errorText = await response.text();
+      console.error('Zoho attach file error:', errorText);
+      return res.status(response.status).json({ error: errorText });
+    }
+    
+    const data = await response.json();
+    console.log(`Successfully attached ${fileName} to bill ${billId}`);
+    res.json(data);
+  } catch (error) {
+    console.error('Error attaching file:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
 app.post('/api/zoho/accounts', async (req, res) => {
   try {
     const { organizationId, accessToken, apiDomain } = req.body;
