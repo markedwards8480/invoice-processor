@@ -185,6 +185,7 @@ async function checkWorkDriveFolder() {
       accessToken,
       workdriveEnabled,
       workdriveTeamId,
+      workdriveWorkspaceId,
       workdriveNewInvoicesFolderId,
       workdriveProcessedFolderId,
       workdriveFailedFolderId
@@ -202,9 +203,9 @@ async function checkWorkDriveFolder() {
 
     console.log('WorkDrive monitoring: Checking for new invoices...');
 
-    // List files in the "New Invoices" folder using the correct WorkDrive API
+    // List files in the "New Invoices" folder using the private API
     const response = await fetch(
-      `https://workdrive.zoho.com/api/v1/teams/${workdriveTeamId}/folders/${workdriveNewInvoicesFolderId}/files`,
+      `https://workdrive.zoho.com/api/v1/private/files?parent_id=${workdriveNewInvoicesFolderId}`,
       {
         headers: {
           'Authorization': `Zoho-oauthtoken ${accessToken}`
