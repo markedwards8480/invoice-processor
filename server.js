@@ -204,7 +204,7 @@ async function checkWorkDriveFolder() {
 
     // List files in the "New Invoices" folder
     const response = await fetch(
-      `https://workdrive.zoho.com/api/v1/files/${workdriveNewInvoicesFolderId}/files`,
+      `https://workdrive.zoho.com/api/v1/files?parent_id=${workdriveNewInvoicesFolderId}`,
       {
         headers: {
           'Authorization': `Zoho-oauthtoken ${accessToken}`
