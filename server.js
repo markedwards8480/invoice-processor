@@ -202,9 +202,9 @@ async function checkWorkDriveFolder() {
 
     console.log('WorkDrive monitoring: Checking for new invoices...');
 
-    // List files in the "New Invoices" folder
+    // List files in the "New Invoices" folder using the correct WorkDrive API
     const response = await fetch(
-      `https://workdrive.zoho.com/api/v1/files?parent_id=${workdriveNewInvoicesFolderId}`,
+      `https://workdrive.zoho.com/api/v1/teams/${workdriveTeamId}/folders/${workdriveNewInvoicesFolderId}/files`,
       {
         headers: {
           'Authorization': `Zoho-oauthtoken ${accessToken}`
@@ -213,7 +213,8 @@ async function checkWorkDriveFolder() {
     );
 
     if (!response.ok) {
-      console.error('WorkDrive monitoring: Failed to fetch files:', response.status);
+      const errorText = await response.text();
+      console.error('WorkDrive monitoring: Failed to fetch files:', response.status, errorText);
       return;
     }
 
