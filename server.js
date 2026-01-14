@@ -81,6 +81,18 @@ async function initializeDatabase() {
       )
     `);
 
+    // Create pending_imports table for temporary storage
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS pending_imports (
+        id SERIAL PRIMARY KEY,
+        file_name VARCHAR(255) NOT NULL,
+        file_data TEXT NOT NULL,
+        workdrive_file_id VARCHAR(255),
+        imported_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        fetched BOOLEAN DEFAULT FALSE
+      )
+    `);
+
     console.log('Database tables initialized successfully');
   } catch (error) {
     console.error('Error initializing database:', error);
@@ -270,18 +282,7 @@ async function checkWorkDriveFolder() {
         // For now, just log it
         console.log(`WorkDrive monitoring: Imported ${file.name}`);
 
-        // Store the file data temporarily in a new table for the frontend to fetch
-        await pool.query(
-          `CREATE TABLE IF NOT EXISTS pending_imports (
-            id SERIAL PRIMARY KEY,
-            file_name VARCHAR(255) NOT NULL,
-            file_data TEXT NOT NULL,
-            workdrive_file_id VARCHAR(255),
-            imported_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            fetched BOOLEAN DEFAULT FALSE
-          )`
-        );
-
+        // Store the file data for the frontend to fetch
         await pool.query(
           `INSERT INTO pending_imports (file_name, file_data, workdrive_file_id)
            VALUES ($1, $2, $3)`,
