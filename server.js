@@ -294,7 +294,7 @@ async function checkWorkDriveFolder() {
         );
 
         if (!downloadResponse.ok) {
-          console.error(`WorkDrive monitoring: Failed to download ${file.name}`);
+          console.error(`WorkDrive monitoring: Failed to download ${file.attributes.name}`);
           continue;
         }
 
@@ -305,22 +305,22 @@ async function checkWorkDriveFolder() {
         await pool.query(
           `INSERT INTO workdrive_files (file_id, file_name, folder_id, status)
            VALUES ($1, $2, $3, 'imported')`,
-          [file.id, file.name, workdriveNewInvoicesFolderId]
+          [file.id, file.attributes.name, workdriveNewInvoicesFolderId]
         );
 
         // Broadcast to connected clients via SSE (we'll add this endpoint)
         // For now, just log it
-        console.log(`WorkDrive monitoring: Imported ${file.name}`);
+        console.log(`WorkDrive monitoring: Imported ${file.attributes.name}`);
 
         // Store the file data for the frontend to fetch
         await pool.query(
           `INSERT INTO pending_imports (file_name, file_data, workdrive_file_id)
            VALUES ($1, $2, $3)`,
-          [file.name, base64Data, file.id]
+          [file.attributes.name, base64Data, file.id]
         );
 
       } catch (error) {
-        console.error(`WorkDrive monitoring: Error importing ${file.name}:`, error);
+        console.error(`WorkDrive monitoring: Error importing ${file.attributes?.name || 'unknown file'}:`, error);
       }
     }
 
