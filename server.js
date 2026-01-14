@@ -962,17 +962,19 @@ app.post('/api/workdrive/move-file', async (req, res) => {
       return res.status(400).json({ error: 'Missing required parameters' });
     }
 
-    // Move file using WorkDrive API
+    // Move file using WorkDrive API - use PATCH instead of POST
     const response = await fetch(
-      `https://workdrive.zoho.com/api/v1/files/${workdriveFileId}/move`,
+      `https://workdrive.zoho.com/api/v1/files/${workdriveFileId}`,
       {
-        method: 'POST',
+        method: 'PATCH',
         headers: {
           'Authorization': `Zoho-oauthtoken ${accessToken}`,
           'Content-Type': 'application/json'
         },
         body: JSON.stringify({
-          parent_id: targetFolder
+          attributes: {
+            parent_id: targetFolder
+          }
         })
       }
     );
