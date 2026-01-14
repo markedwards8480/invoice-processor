@@ -7,7 +7,13 @@ function InvoiceProcessor() {
     accessToken: '',
     refreshToken: '',
     clientId: '',
-    clientSecret: ''
+    clientSecret: '',
+    workdriveEnabled: false,
+    workdriveTeamId: '',
+    workdriveNewInvoicesFolderId: '',
+    workdriveProcessedFolderId: '',
+    workdriveFailedFolderId: '',
+    workdriveCheckInterval: 5
   });
   
   const [files, setFiles] = useState([]);
@@ -69,6 +75,9 @@ function InvoiceProcessor() {
         }
 
         loadTransactionHistory();
+        
+        // Start WorkDrive polling if enabled
+        checkPendingImports();
       } catch (error) {
         console.error('Error loading server data:', error);
         addToLog('error', 'Failed to load configuration from server');
@@ -76,7 +85,57 @@ function InvoiceProcessor() {
     };
     
     loadServerData();
+    
+    // Poll for WorkDrive imports every 30 seconds
+    const workdrivePolling = setInterval(() => {
+      checkPendingImports();
+    }, 30000);
+    
+    return () => clearInterval(workdrivePolling);
   }, []);
+  
+  // Check for pending WorkDrive imports
+  const checkPendingImports = async () => {
+    try {
+      const response = await fetch('/api/workdrive/pending');
+      if (response.ok) {
+        const data = await response.json();
+        const pendingFiles = data.files || [];
+        
+        if (pendingFiles.length > 0) {
+          addToLog('info', `📥 ${pendingFiles.length} new invoice(s) from WorkDrive`);
+          
+          // Convert to file objects and add to queue
+          const newFiles = pendingFiles.map(pf => ({
+            id: Date.now() + Math.random(),
+            file: {
+              name: pf.file_name,
+              type: 'application/pdf',
+              size: 0
+            },
+            base64Data: pf.file_data,
+            workdriveFileId: pf.workdrive_file_id,
+            workdriveImportId: pf.id,
+            status: 'pending',
+            extractedData: null,
+            error: null,
+            isDuplicate: false
+          }));
+          
+          setFiles(prev => [...prev, ...newFiles]);
+          
+          // Mark as fetched
+          await fetch('/api/workdrive/mark-fetched', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ fileIds: pendingFiles.map(pf => pf.id) })
+          });
+        }
+      }
+    } catch (error) {
+      console.error('Error checking pending imports:', error);
+    }
+  };
 
   // Load transaction history with filters
   const loadTransactionHistory = async (resetOffset = false) => {
@@ -454,7 +513,29 @@ function InvoiceProcessor() {
   };
 
   // Extract data from PDF
+  // Extract data from PDF
   const extractInvoiceData = async (fileObj) => {
+    // If file already has base64Data (from WorkDrive), use it directly
+    if (fileObj.base64Data) {
+      try {
+        const response = await fetch('/api/claude/extract', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ base64Data: fileObj.base64Data })
+        });
+
+        if (!response.ok) {
+          throw new Error('Failed to extract invoice data');
+        }
+
+        const data = await response.json();
+        return data;
+      } catch (error) {
+        throw error;
+      }
+    }
+    
+    // Otherwise, read from file upload
     const file = fileObj.file;
     
     return new Promise((resolve, reject) => {
@@ -719,10 +800,46 @@ function InvoiceProcessor() {
         setFiles(prev => prev.map(f => 
           f.id === file.id ? { ...f, status: 'success' } : f
         ));
+        
+        // Move WorkDrive file to Processed folder if applicable
+        if (file.workdriveFileId && config.workdriveProcessedFolderId) {
+          try {
+            await fetch('/api/workdrive/move-file', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                workdriveFileId: file.workdriveFileId,
+                targetFolder: config.workdriveProcessedFolderId,
+                accessToken: config.accessToken
+              })
+            });
+            addToLog('info', `📁 Moved ${file.file.name} to Processed folder`);
+          } catch (moveError) {
+            console.error('Error moving file:', moveError);
+          }
+        }
       } catch (error) {
         setFiles(prev => prev.map(f => 
           f.id === file.id ? { ...f, status: 'error', error: error.message } : f
         ));
+        
+        // Move WorkDrive file to Failed folder if applicable
+        if (file.workdriveFileId && config.workdriveFailedFolderId) {
+          try {
+            await fetch('/api/workdrive/move-file', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                workdriveFileId: file.workdriveFileId,
+                targetFolder: config.workdriveFailedFolderId,
+                accessToken: config.accessToken
+              })
+            });
+            addToLog('warning', `📁 Moved ${file.file.name} to Failed folder`);
+          } catch (moveError) {
+            console.error('Error moving file:', moveError);
+          }
+        }
       }
     }
     
@@ -910,6 +1027,94 @@ function InvoiceProcessor() {
                       placeholder="7abf2fc01230a4b9a0c08f4837aef870f231973226"
                     />
                   </div>
+                </div>
+              </div>
+              
+              {/* WorkDrive Integration Section */}
+              <div className="border-t pt-4 mt-4">
+                <h3 className="text-lg font-semibold text-gray-800 mb-3">📁 Zoho WorkDrive Auto-Import</h3>
+                <p className="text-xs text-gray-600 mb-4">
+                  Automatically import invoices from a Zoho WorkDrive folder. Drop PDFs in the "New Invoices" folder and they'll appear in the queue automatically.
+                </p>
+                
+                <div className="space-y-3">
+                  <div className="flex items-center gap-3">
+                    <input
+                      type="checkbox"
+                      id="workdriveEnabled"
+                      checked={config.workdriveEnabled}
+                      onChange={(e) => setConfig({...config, workdriveEnabled: e.target.checked})}
+                      className="rounded"
+                    />
+                    <label htmlFor="workdriveEnabled" className="text-sm font-medium text-gray-700">
+                      Enable WorkDrive Auto-Import
+                    </label>
+                  </div>
+                  
+                  {config.workdriveEnabled && (
+                    <>
+                      <div>
+                        <label className="block text-sm font-medium text-gray-700 mb-1">
+                          Team ID
+                        </label>
+                        <input
+                          type="text"
+                          value={config.workdriveTeamId}
+                          onChange={(e) => setConfig({...config, workdriveTeamId: e.target.value})}
+                          className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-emerald-500"
+                          placeholder="Find in WorkDrive URL"
+                        />
+                      </div>
+                      
+                      <div>
+                        <label className="block text-sm font-medium text-gray-700 mb-1">
+                          "New Invoices" Folder ID
+                        </label>
+                        <input
+                          type="text"
+                          value={config.workdriveNewInvoicesFolderId}
+                          onChange={(e) => setConfig({...config, workdriveNewInvoicesFolderId: e.target.value})}
+                          className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-emerald-500"
+                          placeholder="Folder where users drop invoices"
+                        />
+                      </div>
+                      
+                      <div>
+                        <label className="block text-sm font-medium text-gray-700 mb-1">
+                          "Processed" Folder ID (Optional)
+                        </label>
+                        <input
+                          type="text"
+                          value={config.workdriveProcessedFolderId}
+                          onChange={(e) => setConfig({...config, workdriveProcessedFolderId: e.target.value})}
+                          className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-emerald-500"
+                          placeholder="Successfully uploaded invoices move here"
+                        />
+                      </div>
+                      
+                      <div>
+                        <label className="block text-sm font-medium text-gray-700 mb-1">
+                          "Failed" Folder ID (Optional)
+                        </label>
+                        <input
+                          type="text"
+                          value={config.workdriveFailedFolderId}
+                          onChange={(e) => setConfig({...config, workdriveFailedFolderId: e.target.value})}
+                          className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-emerald-500"
+                          placeholder="Failed invoices move here"
+                        />
+                      </div>
+                      
+                      <div className="p-3 bg-blue-50 border border-blue-200 rounded-lg">
+                        <p className="text-xs text-blue-800">
+                          <strong>💡 How to find Folder IDs:</strong><br/>
+                          1. Open the folder in WorkDrive<br/>
+                          2. Look at the URL: workdrive.zoho.com/.../<strong>folder/abc123xyz</strong><br/>
+                          3. Copy the ID after "folder/" (e.g., abc123xyz)
+                        </p>
+                      </div>
+                    </>
+                  )}
                 </div>
               </div>
               
