@@ -203,9 +203,9 @@ async function checkWorkDriveFolder() {
 
     console.log('WorkDrive monitoring: Checking for new invoices...');
 
-    // List files in the "New Invoices" folder using the private API
+    // List files in folder using the endpoint that was working before
     const response = await fetch(
-      `https://workdrive.zoho.com/api/v1/private/files?parent_id=${workdriveNewInvoicesFolderId}`,
+      `https://workdrive.zoho.com/api/v1/files?parent_id=${workdriveNewInvoicesFolderId}`,
       {
         headers: {
           'Authorization': `Zoho-oauthtoken ${accessToken}`
@@ -220,7 +220,10 @@ async function checkWorkDriveFolder() {
     }
 
     const data = await response.json();
+    console.log('WorkDrive monitoring: API response:', JSON.stringify(data));
+    
     const files = data.data || [];
+    console.log(`WorkDrive monitoring: Found ${files.length} items in folder`);
 
     // Filter for PDF files only
     const pdfFiles = files.filter(file => 
