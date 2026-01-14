@@ -68,6 +68,19 @@ async function initializeDatabase() {
       )
     `);
 
+    // Create workdrive_files table to track imported files
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS workdrive_files (
+        id SERIAL PRIMARY KEY,
+        file_id VARCHAR(255) UNIQUE NOT NULL,
+        file_name VARCHAR(255) NOT NULL,
+        folder_id VARCHAR(255) NOT NULL,
+        imported_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        status VARCHAR(50) DEFAULT 'imported',
+        moved_to_folder VARCHAR(255)
+      )
+    `);
+
     console.log('Database tables initialized successfully');
   } catch (error) {
     console.error('Error initializing database:', error);
@@ -139,6 +152,170 @@ setTimeout(() => {
   startTokenRefreshCheck();
   console.log('Background token refresh started (checks every 30 minutes)');
 }, 5000);
+
+// Zoho WorkDrive Integration - Background folder monitoring
+let workdriveMonitorInterval = null;
+
+async function checkWorkDriveFolder() {
+  try {
+    // Load config from database
+    const result = await pool.query('SELECT key, value FROM config');
+    const config = {};
+    result.rows.forEach(row => {
+      try {
+        config[row.key] = JSON.parse(row.value);
+      } catch (e) {
+        config[row.key] = row.value;
+      }
+    });
+
+    const {
+      accessToken,
+      workdriveEnabled,
+      workdriveTeamId,
+      workdriveNewInvoicesFolderId,
+      workdriveProcessedFolderId,
+      workdriveFailedFolderId
+    } = config;
+
+    // Only run if WorkDrive is enabled and configured
+    if (!workdriveEnabled || workdriveEnabled === 'false') {
+      return;
+    }
+
+    if (!accessToken || !workdriveTeamId || !workdriveNewInvoicesFolderId) {
+      console.log('WorkDrive monitoring: Missing required configuration');
+      return;
+    }
+
+    console.log('WorkDrive monitoring: Checking for new invoices...');
+
+    // List files in the "New Invoices" folder
+    const response = await fetch(
+      `https://workdrive.zoho.com/api/v1/files/${workdriveNewInvoicesFolderId}/files`,
+      {
+        headers: {
+          'Authorization': `Zoho-oauthtoken ${accessToken}`
+        }
+      }
+    );
+
+    if (!response.ok) {
+      console.error('WorkDrive monitoring: Failed to fetch files:', response.status);
+      return;
+    }
+
+    const data = await response.json();
+    const files = data.data || [];
+
+    // Filter for PDF files only
+    const pdfFiles = files.filter(file => 
+      file.name && file.name.toLowerCase().endsWith('.pdf')
+    );
+
+    if (pdfFiles.length === 0) {
+      console.log('WorkDrive monitoring: No new PDF files found');
+      return;
+    }
+
+    // Check which files we haven't imported yet
+    const newFiles = [];
+    for (const file of pdfFiles) {
+      const existing = await pool.query(
+        'SELECT id FROM workdrive_files WHERE file_id = $1',
+        [file.id]
+      );
+      
+      if (existing.rows.length === 0) {
+        newFiles.push(file);
+      }
+    }
+
+    if (newFiles.length === 0) {
+      console.log('WorkDrive monitoring: All files already imported');
+      return;
+    }
+
+    console.log(`WorkDrive monitoring: Found ${newFiles.length} new invoice(s)`);
+
+    // Import new files
+    for (const file of newFiles) {
+      try {
+        // Download file content
+        const downloadResponse = await fetch(
+          `https://workdrive.zoho.com/api/v1/download/${file.id}`,
+          {
+            headers: {
+              'Authorization': `Zoho-oauthtoken ${accessToken}`
+            }
+          }
+        );
+
+        if (!downloadResponse.ok) {
+          console.error(`WorkDrive monitoring: Failed to download ${file.name}`);
+          continue;
+        }
+
+        const fileBuffer = await downloadResponse.buffer();
+        const base64Data = fileBuffer.toString('base64');
+
+        // Store file info in database
+        await pool.query(
+          `INSERT INTO workdrive_files (file_id, file_name, folder_id, status)
+           VALUES ($1, $2, $3, 'imported')`,
+          [file.id, file.name, workdriveNewInvoicesFolderId]
+        );
+
+        // Broadcast to connected clients via SSE (we'll add this endpoint)
+        // For now, just log it
+        console.log(`WorkDrive monitoring: Imported ${file.name}`);
+
+        // Store the file data temporarily in a new table for the frontend to fetch
+        await pool.query(
+          `CREATE TABLE IF NOT EXISTS pending_imports (
+            id SERIAL PRIMARY KEY,
+            file_name VARCHAR(255) NOT NULL,
+            file_data TEXT NOT NULL,
+            workdrive_file_id VARCHAR(255),
+            imported_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            fetched BOOLEAN DEFAULT FALSE
+          )`
+        );
+
+        await pool.query(
+          `INSERT INTO pending_imports (file_name, file_data, workdrive_file_id)
+           VALUES ($1, $2, $3)`,
+          [file.name, base64Data, file.id]
+        );
+
+      } catch (error) {
+        console.error(`WorkDrive monitoring: Error importing ${file.name}:`, error);
+      }
+    }
+
+  } catch (error) {
+    console.error('WorkDrive monitoring error:', error);
+  }
+}
+
+async function startWorkDriveMonitoring() {
+  // Clear any existing interval
+  if (workdriveMonitorInterval) {
+    clearInterval(workdriveMonitorInterval);
+  }
+
+  // Check immediately on start
+  await checkWorkDriveFolder();
+
+  // Then check every 5 minutes (300000 ms)
+  workdriveMonitorInterval = setInterval(checkWorkDriveFolder, 5 * 60 * 1000);
+  console.log('WorkDrive monitoring started (checks every 5 minutes)');
+}
+
+// Start WorkDrive monitoring after 10 seconds (allow database to initialize)
+setTimeout(() => {
+  startWorkDriveMonitoring();
+}, 10000);
 
 // API endpoint to save configuration
 app.post('/api/config/save', async (req, res) => {
@@ -649,6 +826,104 @@ app.post('/api/zoho/accounts', async (req, res) => {
     res.json({ accounts: expenseAccounts });
   } catch (error) {
     console.error('Error fetching accounts:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// WorkDrive API Endpoints
+
+// Get pending imports from WorkDrive
+app.get('/api/workdrive/pending', async (req, res) => {
+  try {
+    const result = await pool.query(
+      `SELECT id, file_name, file_data, workdrive_file_id, imported_at 
+       FROM pending_imports 
+       WHERE fetched = FALSE 
+       ORDER BY imported_at ASC`
+    );
+
+    res.json({ files: result.rows });
+  } catch (error) {
+    console.error('Error fetching pending imports:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Mark imports as fetched
+app.post('/api/workdrive/mark-fetched', async (req, res) => {
+  try {
+    const { fileIds } = req.body;
+    
+    if (!fileIds || fileIds.length === 0) {
+      return res.status(400).json({ error: 'No file IDs provided' });
+    }
+
+    await pool.query(
+      `UPDATE pending_imports 
+       SET fetched = TRUE 
+       WHERE id = ANY($1)`,
+      [fileIds]
+    );
+
+    res.json({ success: true });
+  } catch (error) {
+    console.error('Error marking imports as fetched:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Move file in WorkDrive (to Processed or Failed folder)
+app.post('/api/workdrive/move-file', async (req, res) => {
+  try {
+    const { workdriveFileId, targetFolder, accessToken } = req.body;
+
+    if (!workdriveFileId || !targetFolder || !accessToken) {
+      return res.status(400).json({ error: 'Missing required parameters' });
+    }
+
+    // Move file using WorkDrive API
+    const response = await fetch(
+      `https://workdrive.zoho.com/api/v1/files/${workdriveFileId}/move`,
+      {
+        method: 'POST',
+        headers: {
+          'Authorization': `Zoho-oauthtoken ${accessToken}`,
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({
+          parent_id: targetFolder
+        })
+      }
+    );
+
+    if (!response.ok) {
+      const errorText = await response.text();
+      console.error('WorkDrive move error:', errorText);
+      return res.status(response.status).json({ error: errorText });
+    }
+
+    // Update database record
+    await pool.query(
+      `UPDATE workdrive_files 
+       SET status = 'moved', moved_to_folder = $1 
+       WHERE file_id = $2`,
+      [targetFolder, workdriveFileId]
+    );
+
+    res.json({ success: true });
+  } catch (error) {
+    console.error('Error moving file:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Manually trigger WorkDrive check
+app.post('/api/workdrive/check-now', async (req, res) => {
+  try {
+    await checkWorkDriveFolder();
+    res.json({ success: true, message: 'WorkDrive check completed' });
+  } catch (error) {
+    console.error('Error checking WorkDrive:', error);
     res.status(500).json({ error: error.message });
   }
 });
