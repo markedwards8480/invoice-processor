@@ -360,20 +360,37 @@ function InvoiceProcessor() {
       }
     }
     
-    // PRIORITY 3: Hardcoded keyword matching (fallback)
+    // PRIORITY 3: Hardcoded keyword matching (fallback) - ordered by specificity
     const keywords = {
-      'shipping': ['shipping', 'freight', 'delivery', 'ship'],
-      'fee': ['fee', 'charge', 'service'],
-      'minimum': ['minimum', 'min'],
-      'credit card': ['credit card', 'cc', 'payment processing'],
-      'sticker': ['sticker', 'label', 'packaging']
+      // Software & Subscriptions (most specific first)
+      'software': ['software', 'saas', 'subscription', 'license', 'cloud', 'app'],
+      'web hosting': ['hosting', 'domain', 'server'],
+      'office supplies': ['office supplies', 'supplies', 'stationery', 'paper'],
+      'advertising': ['advertising', 'marketing', 'ads', 'promotion'],
+      'professional fees': ['consulting', 'consultant', 'professional services'],
+      'shipping': ['shipping', 'freight', 'delivery', 'courier'],
+      'insurance': ['insurance', 'coverage'],
+      'rent': ['rent', 'lease'],
+      'utilities': ['utilities', 'electric', 'gas', 'water', 'internet'],
+      'telephone': ['telephone', 'phone', 'mobile', 'cell'],
+      'bank charges': ['bank charge', 'bank fee', 'transaction fee', 'wire fee'],
+      'credit card': ['credit card', 'cc fee', 'payment processing', 'merchant'],
+      'meals': ['meal', 'lunch', 'dinner', 'restaurant', 'food'],
+      'travel': ['travel', 'airfare', 'hotel', 'lodging'],
+      'dues': ['dues', 'membership', 'association'],
+      'repairs': ['repair', 'maintenance', 'fix'],
+      'cleaning': ['cleaning', 'janitorial'],
+      // Generic categories last
+      'fee': ['service charge', 'processing fee'],  // More specific than just "fee"
+      'minimum': ['minimum charge', 'minimum order']
     };
     
+    // Try matching from most specific to least specific
     for (const [category, terms] of Object.entries(keywords)) {
       if (terms.some(term => desc.includes(term))) {
         const account = accounts.find(a => 
           a.account_name.toLowerCase().includes(category) ||
-          a.account_name.toLowerCase().includes(terms[0])
+          terms.some(t => a.account_name.toLowerCase().includes(t))
         );
         if (account) return account.account_id;
       }
@@ -1786,7 +1803,8 @@ function InvoiceProcessor() {
                                   updateLineItem(index, 'account_search', e.target.value);
                                 }}
                                 onFocus={() => updateLineItem(index, 'account_dropdown_open', true)}
-                                className={`w-full px-2 py-1 border rounded text-sm ${
+                                onClick={() => updateLineItem(index, 'account_dropdown_open', true)}
+                                className={`w-full px-2 py-1 border rounded text-sm cursor-pointer ${
                                   !item.account_id ? 'border-red-300 bg-red-50' : 'border-gray-300'
                                 }`}
                               />
