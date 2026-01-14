@@ -851,7 +851,7 @@ function InvoiceProcessor() {
         // Move WorkDrive file to Processed folder if applicable
         if (file.workdriveFileId && config.workdriveProcessedFolderId) {
           try {
-            await fetch('/api/workdrive/move-file', {
+            const moveResponse = await fetch('/api/workdrive/move-file', {
               method: 'POST',
               headers: { 'Content-Type': 'application/json' },
               body: JSON.stringify({
@@ -860,9 +860,16 @@ function InvoiceProcessor() {
                 accessToken: config.accessToken
               })
             });
-            addToLog('info', `📁 Moved ${file.file.name} to Processed folder`);
+            
+            if (moveResponse.ok) {
+              addToLog('success', `📁 Moved ${file.file.name} to Processed folder`);
+            } else {
+              const errorText = await moveResponse.text();
+              addToLog('warning', `⚠ Upload succeeded but file move failed: ${errorText}`);
+            }
           } catch (moveError) {
             console.error('Error moving file:', moveError);
+            addToLog('warning', `⚠ Upload succeeded but file move failed: ${moveError.message}`);
           }
         }
       } catch (error) {
@@ -873,7 +880,7 @@ function InvoiceProcessor() {
         // Move WorkDrive file to Failed folder if applicable
         if (file.workdriveFileId && config.workdriveFailedFolderId) {
           try {
-            await fetch('/api/workdrive/move-file', {
+            const moveResponse = await fetch('/api/workdrive/move-file', {
               method: 'POST',
               headers: { 'Content-Type': 'application/json' },
               body: JSON.stringify({
@@ -882,9 +889,16 @@ function InvoiceProcessor() {
                 accessToken: config.accessToken
               })
             });
-            addToLog('warning', `📁 Moved ${file.file.name} to Failed folder`);
+            
+            if (moveResponse.ok) {
+              addToLog('warning', `📁 Moved ${file.file.name} to Failed folder`);
+            } else {
+              const errorText = await moveResponse.text();
+              addToLog('error', `⚠ File move to Failed folder failed: ${errorText}`);
+            }
           } catch (moveError) {
             console.error('Error moving file:', moveError);
+            addToLog('error', `⚠ File move to Failed folder failed: ${moveError.message}`);
           }
         }
       }
