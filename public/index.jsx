@@ -10,6 +10,7 @@ function InvoiceProcessor() {
     clientSecret: '',
     workdriveEnabled: false,
     workdriveTeamId: '',
+    workdriveWorkspaceId: '',
     workdriveNewInvoicesFolderId: '',
     workdriveProcessedFolderId: '',
     workdriveFailedFolderId: '',
@@ -1063,6 +1064,19 @@ function InvoiceProcessor() {
                           onChange={(e) => setConfig({...config, workdriveTeamId: e.target.value})}
                           className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-emerald-500"
                           placeholder="Find in WorkDrive URL"
+                        />
+                      </div>
+                      
+                      <div>
+                        <label className="block text-sm font-medium text-gray-700 mb-1">
+                          Workspace ID
+                        </label>
+                        <input
+                          type="text"
+                          value={config.workdriveWorkspaceId}
+                          onChange={(e) => setConfig({...config, workdriveWorkspaceId: e.target.value})}
+                          className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-emerald-500"
+                          placeholder="Find in WorkDrive URL after /ws/"
                         />
                       </div>
                       
