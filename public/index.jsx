@@ -763,6 +763,12 @@ function InvoiceProcessor() {
         notes: data.notes || ''
       };
 
+      // Add tax if present (manual adjustment approach for Canadian taxes)
+      if (data.tax && data.tax > 0) {
+        billData.adjustment = data.tax;
+        billData.adjustment_description = `Sales Tax (${data.taxType || 'GST/HST/PST/QST'})`;
+      }
+
       const billResponse = await fetch('/api/zoho/bill', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -1965,6 +1971,47 @@ function InvoiceProcessor() {
                       <label className="block text-sm font-medium text-gray-700">Total</label>
                       <p className="text-lg font-bold text-emerald-600">${currentPreview.extractedData.total?.toFixed(2) || '0.00'}</p>
                     </div>
+                  </div>
+
+                  {/* Tax Section */}
+                  <div className="bg-yellow-50 border border-yellow-200 rounded-lg p-4">
+                    <label className="block text-sm font-medium text-gray-700 mb-2">
+                      Sales Tax (GST/HST/PST/QST)
+                    </label>
+                    <div className="grid grid-cols-2 gap-3">
+                      <div>
+                        <label className="block text-xs text-gray-600 mb-1">Total Tax Amount</label>
+                        <input
+                          type="number"
+                          step="0.01"
+                          value={currentPreview.extractedData.tax || 0}
+                          onChange={(e) => updateExtractedData('tax', parseFloat(e.target.value) || 0)}
+                          className="w-full px-3 py-2 border border-gray-300 rounded-lg"
+                        />
+                      </div>
+                      <div>
+                        <label className="block text-xs text-gray-600 mb-1">Tax Type</label>
+                        <select
+                          value={currentPreview.extractedData.taxType || 'none'}
+                          onChange={(e) => updateExtractedData('taxType', e.target.value)}
+                          className="w-full px-3 py-2 border border-gray-300 rounded-lg"
+                        >
+                          <option value="none">No Tax</option>
+                          <option value="gst">GST (5%)</option>
+                          <option value="hst">HST (13-15%)</option>
+                          <option value="gst_pst">GST + PST</option>
+                          <option value="gst_qst">GST + QST</option>
+                        </select>
+                      </div>
+                    </div>
+                    {currentPreview.extractedData.taxDetails && (
+                      <div className="mt-2 text-xs text-gray-600">
+                        {currentPreview.extractedData.taxDetails.gst > 0 && <div>GST: ${currentPreview.extractedData.taxDetails.gst.toFixed(2)}</div>}
+                        {currentPreview.extractedData.taxDetails.hst > 0 && <div>HST: ${currentPreview.extractedData.taxDetails.hst.toFixed(2)}</div>}
+                        {currentPreview.extractedData.taxDetails.pst > 0 && <div>PST: ${currentPreview.extractedData.taxDetails.pst.toFixed(2)}</div>}
+                        {currentPreview.extractedData.taxDetails.qst > 0 && <div>QST: ${currentPreview.extractedData.taxDetails.qst.toFixed(2)}</div>}
+                      </div>
+                    )}
                   </div>
 
                   {/* Notes */}
