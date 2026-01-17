@@ -782,33 +782,8 @@ function InvoiceProcessor() {
       
       addToLog('success', `✓ Invoice ${data.invoiceNumber} uploaded successfully! Amount: $${data.total?.toFixed(2) || '0.00'} ${data.currency || 'CAD'}`);
 
-      // ATTACH PDF TO BILL
-      if (billId && fileObj.file) {
-        try {
-          addToLog('info', `📎 Attaching PDF to bill...`);
-          
-          const attachResponse = await fetch('/api/zoho/attach-file', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              billId: billId,
-              fileName: fileObj.file.name,
-              fileData: fileObj.fileData, // Base64 data
-              config: config
-            })
-          });
-
-          if (attachResponse.ok) {
-            addToLog('success', `✓ PDF attached to bill in Zoho Books`);
-          } else {
-            const errorText = await attachResponse.text();
-            addToLog('warning', `⚠ Bill created but PDF attachment failed: ${errorText}`);
-          }
-        } catch (attachError) {
-          console.error('Attachment error:', attachError);
-          addToLog('warning', `⚠ Bill created but PDF attachment failed: ${attachError.message}`);
-        }
-      }
+      // TODO: PDF attachment disabled until form-data package is installed on server
+      // Will add this feature back once Railway has the required npm package
 
       // AUTOMATIC LEARNING: Save GL code mappings for successful uploads
       if (data.lineItems && data.lineItems.length > 0) {
@@ -1913,6 +1888,10 @@ function InvoiceProcessor() {
                                 value={item.account_search || ''}
                                 onChange={(e) => {
                                   updateLineItem(index, 'account_search', e.target.value);
+                                  // Keep dropdown open while typing
+                                  if (!item.account_dropdown_open) {
+                                    updateLineItem(index, 'account_dropdown_open', true);
+                                  }
                                 }}
                                 onFocus={() => updateLineItem(index, 'account_dropdown_open', true)}
                                 onClick={() => updateLineItem(index, 'account_dropdown_open', true)}
