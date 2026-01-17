@@ -962,27 +962,50 @@ app.post('/api/workdrive/move-file', async (req, res) => {
       return res.status(400).json({ error: 'Missing required parameters' });
     }
 
-    // Move file using WorkDrive API - use PATCH instead of POST
-    const response = await fetch(
-      `https://workdrive.zoho.com/api/v1/files/${workdriveFileId}`,
+    console.log(`Moving file ${workdriveFileId} to folder ${targetFolder}...`);
+
+    // Step 1: Copy file to target folder
+    const copyResponse = await fetch(
+      `https://workdrive.zoho.com/api/v1/files/${workdriveFileId}/copy`,
       {
-        method: 'PATCH',
+        method: 'POST',
         headers: {
           'Authorization': `Zoho-oauthtoken ${accessToken}`,
           'Content-Type': 'application/json'
         },
         body: JSON.stringify({
-          attributes: {
-            parent_id: targetFolder
-          }
+          parent_id: targetFolder
         })
       }
     );
 
-    if (!response.ok) {
-      const errorText = await response.text();
-      console.error('WorkDrive move error:', errorText);
-      return res.status(response.status).json({ error: errorText });
+    if (!copyResponse.ok) {
+      const errorText = await copyResponse.text();
+      console.error('WorkDrive copy error:', errorText);
+      return res.status(copyResponse.status).json({ error: `Copy failed: ${errorText}` });
+    }
+
+    const copyData = await copyResponse.json();
+    console.log(`File copied successfully, new ID: ${copyData.data?.id}`);
+
+    // Step 2: Delete original file (trash it)
+    const deleteResponse = await fetch(
+      `https://workdrive.zoho.com/api/v1/files/${workdriveFileId}`,
+      {
+        method: 'DELETE',
+        headers: {
+          'Authorization': `Zoho-oauthtoken ${accessToken}`
+        }
+      }
+    );
+
+    if (!deleteResponse.ok) {
+      const errorText = await deleteResponse.text();
+      console.error('WorkDrive delete error:', errorText);
+      // Copy succeeded but delete failed - not critical
+      console.log('File copied but original could not be deleted');
+    } else {
+      console.log(`Original file ${workdriveFileId} deleted successfully`);
     }
 
     // Update database record
@@ -993,7 +1016,7 @@ app.post('/api/workdrive/move-file', async (req, res) => {
       [targetFolder, workdriveFileId]
     );
 
-    res.json({ success: true });
+    res.json({ success: true, newFileId: copyData.data?.id });
   } catch (error) {
     console.error('Error moving file:', error);
     res.status(500).json({ error: error.message });
