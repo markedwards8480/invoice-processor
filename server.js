@@ -748,9 +748,10 @@ app.post('/api/zoho/vendor', async (req, res) => {
     
     console.log('Creating/finding vendor:', vendorName);
     
-    // Search for existing vendor
+    // Fetch all vendors and search case-insensitively
+    // Zoho's contact_name parameter is case-sensitive, so we need to fetch and filter
     const searchResponse = await fetch(
-      `${config.apiDomain}/books/v3/contacts?organization_id=${config.organizationId}&contact_name=${encodeURIComponent(vendorName)}`,
+      `${config.apiDomain}/books/v3/contacts?organization_id=${config.organizationId}&contact_type=vendor`,
       {
         headers: {
           'Authorization': `Zoho-oauthtoken ${config.accessToken}`
@@ -766,9 +767,17 @@ app.post('/api/zoho/vendor', async (req, res) => {
 
     const searchData = await searchResponse.json();
     
+    // Case-insensitive search for existing vendor
     if (searchData.contacts && searchData.contacts.length > 0) {
-      console.log('Found existing vendor:', searchData.contacts[0].contact_id);
-      return res.json({ vendorId: searchData.contacts[0].contact_id });
+      const normalizedSearchName = vendorName.toLowerCase().trim();
+      const matchingVendor = searchData.contacts.find(contact => 
+        contact.contact_name.toLowerCase().trim() === normalizedSearchName
+      );
+      
+      if (matchingVendor) {
+        console.log(`Found existing vendor: ${matchingVendor.contact_name} (ID: ${matchingVendor.contact_id})`);
+        return res.json({ vendorId: matchingVendor.contact_id });
+      }
     }
 
     // Create new vendor
