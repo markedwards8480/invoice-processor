@@ -696,8 +696,20 @@ app.post('/api/claude/extract', async (req, res) => {
   ],
   "subtotal": number,
   "tax": number,
+  "taxDetails": {
+    "gst": number or 0,
+    "hst": number or 0,
+    "pst": number or 0,
+    "qst": number or 0
+  },
   "total": number
-}`
+}
+
+IMPORTANT for tax extraction:
+- Look for GST, HST, PST, QST, or any sales tax line items
+- taxDetails should break down each tax separately (GST=5%, HST=13-15%, PST=7-10%, QST=9.975%)
+- "tax" should be the total of all taxes combined
+- If no tax breakdown is visible, put the total tax in "tax" and set all taxDetails to 0`
             }
           ]
         }]
