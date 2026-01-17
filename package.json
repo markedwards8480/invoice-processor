@@ -1,15 +1,15 @@
-{
-  "name": "invoice-processor",
-  "version": "1.0.0",
-  "description": "Invoice processor with Zoho Books integration",
-  "main": "server.js",
-  "scripts": {
-    "start": "node server.js"
-  },
-  "dependencies": {
-    "express": "^4.18.2",
-    "cors": "^2.8.5",
-    "node-fetch": "^2.6.7",
-    "pg": "^8.11.3"
-  }
-}
+	
+name	"invoice-processor"
+version	"1.0.0"
+description	"Invoice processing application with Zoho Books integration"
+main	"server.js"
+scripts	
+start	"node server.js"
+dependencies	
+express	"^4.18.2"
+cors	"^2.8.5"
+node-fetch	"^2.7.0"
+pg	"^8.11.3"
+form-data	"^4.0.0"
+engines	
+node	">=16.x"
