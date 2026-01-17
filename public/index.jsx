@@ -788,8 +788,33 @@ function InvoiceProcessor() {
       
       addToLog('success', `✓ Invoice ${data.invoiceNumber} uploaded successfully! Amount: $${data.total?.toFixed(2) || '0.00'} ${data.currency || 'CAD'}`);
 
-      // TODO: PDF attachment disabled until form-data package is installed on server
-      // Will add this feature back once Railway has the required npm package
+      // ATTACH PDF TO BILL
+      if (billId && fileObj.fileData) {
+        try {
+          addToLog('info', `📎 Attaching PDF to bill...`);
+          
+          const attachResponse = await fetch('/api/zoho/attach-file', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              billId: billId,
+              fileName: fileObj.file?.name || 'invoice.pdf',
+              fileData: fileObj.fileData, // Base64 data
+              config: config
+            })
+          });
+
+          if (attachResponse.ok) {
+            addToLog('success', `✓ PDF attached to bill in Zoho Books`);
+          } else {
+            const errorText = await attachResponse.text();
+            addToLog('warning', `⚠ Bill created but PDF attachment failed: ${errorText}`);
+          }
+        } catch (attachError) {
+          console.error('Attachment error:', attachError);
+          addToLog('warning', `⚠ Bill created but PDF attachment failed: ${attachError.message}`);
+        }
+      }
 
       // AUTOMATIC LEARNING: Save GL code mappings for successful uploads
       if (data.lineItems && data.lineItems.length > 0) {
