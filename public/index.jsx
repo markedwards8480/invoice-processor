@@ -293,6 +293,35 @@ function InvoiceProcessor() {
   };
 
   // Fetch Chart of Accounts from Zoho Books
+  // Reload config from server (useful when tokens have been refreshed on backend)
+  const reloadConfigFromServer = async () => {
+    try {
+      const response = await fetch('/api/config');
+      if (response.ok) {
+        const data = await response.json();
+        const serverConfig = {};
+        
+        for (const [key, value] of Object.entries(data.config)) {
+          try {
+            serverConfig[key] = JSON.parse(value);
+          } catch (e) {
+            serverConfig[key] = value;
+          }
+        }
+        
+        setConfig(prev => ({
+          ...prev,
+          ...serverConfig
+        }));
+        
+        return serverConfig;
+      }
+    } catch (error) {
+      console.error('Failed to reload config:', error);
+    }
+    return null;
+  };
+
   const fetchAccounts = async () => {
     if (!config.organizationId || !config.accessToken) {
       return;
@@ -310,6 +339,44 @@ function InvoiceProcessor() {
           apiDomain: config.apiDomain
         })
       });
+
+      // If unauthorized, try reloading config from server (backend might have refreshed)
+      if (response.status === 401) {
+        addToLog('warning', 'Token expired, reloading fresh config from server...');
+        const newConfig = await reloadConfigFromServer();
+        
+        if (newConfig && newConfig.accessToken) {
+          // Retry with fresh token
+          const retryResponse = await fetch('/api/zoho/accounts', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              organizationId: newConfig.organizationId || config.organizationId,
+              accessToken: newConfig.accessToken,
+              apiDomain: newConfig.apiDomain || config.apiDomain
+            })
+          });
+          
+          if (!retryResponse.ok) {
+            throw new Error('Failed to fetch accounts even after reloading config');
+          }
+          
+          const data = await retryResponse.json();
+          const loadedAccounts = data.accounts || [];
+          setAccounts(loadedAccounts);
+          
+          await fetch('/api/accounts/cache', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ accounts: loadedAccounts })
+          });
+          
+          addToLog('success', `✓ Loaded ${loadedAccounts.length} accounts from Zoho Books (after token refresh)`);
+          return;
+        }
+        
+        throw new Error('Token expired and could not be refreshed. Please update your credentials in Settings.');
+      }
 
       if (!response.ok) {
         throw new Error('Failed to fetch accounts');
@@ -658,9 +725,11 @@ function InvoiceProcessor() {
       });
 
       if (vendorResponse.status === 401 && retryCount === 0) {
-        addToLog('warning', 'Access token expired, refreshing...');
-        const newToken = await refreshAccessToken();
-        if (newToken) {
+        addToLog('warning', 'Token expired, reloading fresh config from server...');
+        const newConfig = await reloadConfigFromServer();
+        
+        if (newConfig && newConfig.accessToken) {
+          // Update fileObj with new config and retry
           return uploadToZoho(fileObj, 1);
         } else {
           throw new Error('Access token expired. Please update your token in Settings.');
