@@ -48,7 +48,7 @@ async function initDatabase() {
 }
 
 app.use(express.json());
-app.use(express.static('.'));
+app.use(express.static('public'));
 
 // Get configuration - now from environment variables
 app.get('/api/config', async (req, res) => {
