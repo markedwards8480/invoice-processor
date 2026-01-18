@@ -20,6 +20,10 @@ const pool = new Pool({
   ssl: process.env.DATABASE_URL ? { rejectUnauthorized: false } : false
 });
 
+// In-memory cache for access token (backed by database)
+let cachedAccessToken = null;
+let tokenLastRefreshed = null;
+
 // Initialize database tables
 async function initializeDatabase() {
   try {
@@ -29,6 +33,17 @@ async function initializeDatabase() {
         id SERIAL PRIMARY KEY,
         key VARCHAR(255) UNIQUE NOT NULL,
         value TEXT NOT NULL,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      )
+    `);
+
+    // Create zoho_tokens table for persistent token storage
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS zoho_tokens (
+        id SERIAL PRIMARY KEY,
+        access_token TEXT NOT NULL,
+        refresh_token TEXT,
+        expires_at TIMESTAMP,
         updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
       )
     `);
@@ -97,74 +112,221 @@ async function initializeDatabase() {
     `);
 
     console.log('Database tables initialized successfully');
+    
+    // Initialize token from database or environment variable
+    await initializeAccessToken();
+    
   } catch (error) {
     console.error('Error initializing database:', error);
   }
 }
 
-initializeDatabase();
+// Get current valid access token (from cache, database, or refresh)
+async function getAccessToken() {
+  // If we have a cached token that was refreshed less than 45 minutes ago, use it
+  if (cachedAccessToken && tokenLastRefreshed) {
+    const minutesSinceRefresh = (Date.now() - tokenLastRefreshed) / (1000 * 60);
+    if (minutesSinceRefresh < 45) {
+      return cachedAccessToken;
+    }
+  }
+  
+  // Try to get token from database
+  try {
+    const result = await pool.query(
+      'SELECT access_token, updated_at FROM zoho_tokens ORDER BY updated_at DESC LIMIT 1'
+    );
+    
+    if (result.rows.length > 0) {
+      const dbToken = result.rows[0];
+      const tokenAge = (Date.now() - new Date(dbToken.updated_at).getTime()) / (1000 * 60);
+      
+      // If token is less than 45 minutes old, use it
+      if (tokenAge < 45) {
+        cachedAccessToken = dbToken.access_token;
+        tokenLastRefreshed = new Date(dbToken.updated_at).getTime();
+        console.log(`Using database token (${Math.round(tokenAge)} minutes old)`);
+        return cachedAccessToken;
+      }
+    }
+  } catch (error) {
+    console.error('Error reading token from database:', error);
+  }
+  
+  // Token is stale or missing, refresh it
+  const newToken = await refreshAccessToken();
+  if (newToken) {
+    return newToken;
+  }
+  
+  // Fallback to environment variable (initial setup)
+  if (process.env.ZOHO_ACCESS_TOKEN) {
+    console.log('Using environment variable token as fallback');
+    return process.env.ZOHO_ACCESS_TOKEN;
+  }
+  
+  throw new Error('No valid access token available');
+}
 
-// Background token refresh - checks every 30 minutes
+// Initialize access token on startup
+async function initializeAccessToken() {
+  try {
+    // Check if we have a token in the database
+    const result = await pool.query(
+      'SELECT access_token, updated_at FROM zoho_tokens ORDER BY updated_at DESC LIMIT 1'
+    );
+    
+    if (result.rows.length > 0) {
+      const dbToken = result.rows[0];
+      const tokenAge = (Date.now() - new Date(dbToken.updated_at).getTime()) / (1000 * 60);
+      
+      if (tokenAge < 45) {
+        cachedAccessToken = dbToken.access_token;
+        tokenLastRefreshed = new Date(dbToken.updated_at).getTime();
+        console.log(`Loaded existing token from database (${Math.round(tokenAge)} minutes old)`);
+        return;
+      } else {
+        console.log(`Database token is ${Math.round(tokenAge)} minutes old, will refresh`);
+      }
+    }
+    
+    // If no valid database token, try to refresh using refresh token
+    const refreshToken = process.env.ZOHO_REFRESH_TOKEN;
+    const clientId = process.env.ZOHO_CLIENT_ID;
+    const clientSecret = process.env.ZOHO_CLIENT_SECRET;
+    
+    if (refreshToken && clientId && clientSecret) {
+      console.log('Refreshing token on startup...');
+      await refreshAccessToken();
+    } else if (process.env.ZOHO_ACCESS_TOKEN) {
+      // Store the environment variable token in database as initial seed
+      console.log('Seeding database with environment variable token...');
+      await saveAccessToken(process.env.ZOHO_ACCESS_TOKEN);
+    } else {
+      console.log('Warning: No Zoho credentials configured');
+    }
+  } catch (error) {
+    console.error('Error initializing access token:', error);
+  }
+}
+
+// Refresh access token using refresh token
+async function refreshAccessToken() {
+  const refreshToken = process.env.ZOHO_REFRESH_TOKEN;
+  const clientId = process.env.ZOHO_CLIENT_ID;
+  const clientSecret = process.env.ZOHO_CLIENT_SECRET;
+  
+  if (!refreshToken || !clientId || !clientSecret) {
+    console.error('Cannot refresh token: Missing ZOHO_REFRESH_TOKEN, ZOHO_CLIENT_ID, or ZOHO_CLIENT_SECRET');
+    return null;
+  }
+  
+  try {
+    console.log('Refreshing Zoho access token...');
+    
+    const response = await fetch('https://accounts.zoho.com/oauth/v2/token', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({
+        refresh_token: refreshToken,
+        client_id: clientId,
+        client_secret: clientSecret,
+        grant_type: 'refresh_token'
+      })
+    });
+    
+    if (!response.ok) {
+      const errorText = await response.text();
+      console.error('Token refresh failed:', errorText);
+      return null;
+    }
+    
+    const data = await response.json();
+    
+    if (data.access_token) {
+      // Save to database and cache
+      await saveAccessToken(data.access_token);
+      console.log('✓ Access token refreshed and saved to database');
+      return data.access_token;
+    } else {
+      console.error('No access_token in refresh response:', data);
+      return null;
+    }
+  } catch (error) {
+    console.error('Error refreshing access token:', error);
+    return null;
+  }
+}
+
+// Save access token to database
+async function saveAccessToken(token) {
+  try {
+    // Delete old tokens and insert new one
+    await pool.query('DELETE FROM zoho_tokens');
+    await pool.query(
+      'INSERT INTO zoho_tokens (access_token, updated_at) VALUES ($1, CURRENT_TIMESTAMP)',
+      [token]
+    );
+    
+    // Update cache
+    cachedAccessToken = token;
+    tokenLastRefreshed = Date.now();
+    
+    console.log('Access token saved to database');
+  } catch (error) {
+    console.error('Error saving access token to database:', error);
+  }
+}
+
+// Background token refresh - proactively refresh every 30 minutes
 let tokenRefreshInterval = null;
 
-async function startTokenRefreshCheck() {
+function startTokenRefreshCheck() {
   // Clear any existing interval
   if (tokenRefreshInterval) {
     clearInterval(tokenRefreshInterval);
   }
   
-  // Check every 30 minutes
+  // Refresh every 30 minutes (tokens expire after 1 hour)
   tokenRefreshInterval = setInterval(async () => {
     try {
-      // Use environment variables for refresh
-      const refreshToken = process.env.ZOHO_REFRESH_TOKEN;
-      const clientId = process.env.ZOHO_CLIENT_ID;
-      const clientSecret = process.env.ZOHO_CLIENT_SECRET;
-      
-      if (refreshToken && clientId && clientSecret) {
-        console.log('Background token refresh: Refreshing access token...');
-        
-        const response = await fetch('https://accounts.zoho.com/oauth/v2/token', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-          body: new URLSearchParams({
-            refresh_token: refreshToken,
-            client_id: clientId,
-            client_secret: clientSecret,
-            grant_type: 'refresh_token'
-          })
-        });
-        
-        if (response.ok) {
-          const data = await response.json();
-          if (data.access_token) {
-            // Note: With environment variables, we can't update the token
-            // This would need Railway API or manual update
-            console.log('Background token refresh: Token refreshed (update ZOHO_ACCESS_TOKEN in Railway)');
-          }
-        } else {
-          console.error('Background token refresh: Failed to refresh token');
-        }
+      console.log('Background token refresh: Starting proactive refresh...');
+      const newToken = await refreshAccessToken();
+      if (newToken) {
+        console.log('Background token refresh: Success');
+      } else {
+        console.error('Background token refresh: Failed');
       }
     } catch (error) {
       console.error('Background token refresh error:', error);
     }
   }, 30 * 60 * 1000); // 30 minutes
+  
+  console.log('Background token refresh scheduled (every 30 minutes)');
 }
 
-// Start background refresh after 5 seconds (allow server to fully initialize)
-setTimeout(() => {
-  startTokenRefreshCheck();
-  console.log('Background token refresh started (checks every 30 minutes)');
-}, 5000);
+// Initialize database and start background processes
+initializeDatabase().then(() => {
+  // Start background token refresh after database is ready
+  setTimeout(() => {
+    startTokenRefreshCheck();
+  }, 5000);
+});
 
 // Zoho WorkDrive Integration - Background folder monitoring
 let workdriveMonitorInterval = null;
 
 async function checkWorkDriveFolder() {
   try {
-    // Use environment variables
-    const accessToken = process.env.ZOHO_ACCESS_TOKEN;
+    // Get current access token
+    let accessToken;
+    try {
+      accessToken = await getAccessToken();
+    } catch (error) {
+      console.log('WorkDrive monitoring: No valid token available');
+      return;
+    }
+    
     const workdriveEnabled = process.env.WORKDRIVE_ENABLED;
     const workdriveTeamId = process.env.WORKDRIVE_TEAM_ID;
     const workdriveNewInvoicesFolderId = process.env.WORKDRIVE_NEW_INVOICES_FOLDER_ID;
@@ -174,7 +336,7 @@ async function checkWorkDriveFolder() {
       return;
     }
 
-    if (!accessToken || !workdriveTeamId || !workdriveNewInvoicesFolderId) {
+    if (!workdriveTeamId || !workdriveNewInvoicesFolderId) {
       console.log('WorkDrive monitoring: Missing required configuration');
       return;
     }
@@ -324,17 +486,23 @@ setTimeout(() => {
   startWorkDriveMonitoring();
 }, 10000);
 
-// NEW: API endpoint to get config from environment variables
+// API endpoint to get config (returns status, not actual credentials)
 app.get('/api/config', async (req, res) => {
   try {
+    // Check if we have a valid token
+    let hasValidToken = false;
+    try {
+      const token = await getAccessToken();
+      hasValidToken = !!token;
+    } catch (error) {
+      hasValidToken = false;
+    }
+    
     const config = {
       apiDomain: process.env.ZOHO_API_DOMAIN || 'https://www.zohoapis.com',
       organizationId: process.env.ZOHO_ORGANIZATION_ID || '',
-      accessToken: process.env.ZOHO_ACCESS_TOKEN || '',
-      refreshToken: process.env.ZOHO_REFRESH_TOKEN || '',
-      clientId: process.env.ZOHO_CLIENT_ID || '',
-      clientSecret: process.env.ZOHO_CLIENT_SECRET || '',
-      workdriveEnabled: process.env.WORKDRIVE_ENABLED || 'false',
+      accessToken: hasValidToken ? '[CONFIGURED]' : '',  // Don't expose actual token
+      workdriveEnabled: process.env.WORKDRIVE_ENABLED === 'true',
       workdriveTeamId: process.env.WORKDRIVE_TEAM_ID || '',
       workdriveWorkspaceId: process.env.WORKDRIVE_WORKSPACE_ID || '',
       workdriveNewInvoicesFolderId: process.env.WORKDRIVE_NEW_INVOICES_FOLDER_ID || '',
@@ -349,52 +517,45 @@ app.get('/api/config', async (req, res) => {
   }
 });
 
-// API endpoint to save configuration (stores in database as backup)
-app.post('/api/config/save', async (req, res) => {
+// API endpoint to manually trigger token refresh
+app.post('/api/auth/refresh', async (req, res) => {
   try {
-    const config = req.body;
-    
-    // Store each config field in database as backup
-    for (const [key, value] of Object.entries(config)) {
-      await pool.query(
-        'INSERT INTO config (key, value, updated_at) VALUES ($1, $2, CURRENT_TIMESTAMP) ON CONFLICT (key) DO UPDATE SET value = $2, updated_at = CURRENT_TIMESTAMP',
-        [key, JSON.stringify(value)]
-      );
+    const newToken = await refreshAccessToken();
+    if (newToken) {
+      res.json({ success: true, message: 'Token refreshed successfully' });
+    } else {
+      res.status(500).json({ error: 'Failed to refresh token' });
     }
-
-    res.json({ success: true, message: 'Configuration saved to database (Note: Primary config is from environment variables)' });
   } catch (error) {
-    console.error('Error saving config:', error);
-    res.status(500).json({ error: 'Failed to save configuration' });
+    console.error('Error refreshing token:', error);
+    res.status(500).json({ error: error.message });
   }
 });
 
-// API endpoint to load configuration from database
-app.get('/api/config/load', async (req, res) => {
+// API endpoint to check token status
+app.get('/api/auth/status', async (req, res) => {
   try {
-    const result = await pool.query('SELECT key, value FROM config');
+    const result = await pool.query(
+      'SELECT updated_at FROM zoho_tokens ORDER BY updated_at DESC LIMIT 1'
+    );
     
-    const config = {
-      apiDomain: 'https://www.zohoapis.com',
-      organizationId: '',
-      accessToken: '',
-      refreshToken: '',
-      clientId: '',
-      clientSecret: ''
-    };
-
-    result.rows.forEach(row => {
-      try {
-        config[row.key] = JSON.parse(row.value);
-      } catch (e) {
-        config[row.key] = row.value;
-      }
+    let tokenAge = null;
+    let hasToken = false;
+    
+    if (result.rows.length > 0) {
+      hasToken = true;
+      tokenAge = Math.round((Date.now() - new Date(result.rows[0].updated_at).getTime()) / (1000 * 60));
+    }
+    
+    res.json({
+      hasToken,
+      tokenAgeMinutes: tokenAge,
+      hasRefreshToken: !!process.env.ZOHO_REFRESH_TOKEN,
+      hasClientCredentials: !!(process.env.ZOHO_CLIENT_ID && process.env.ZOHO_CLIENT_SECRET)
     });
-
-    res.json(config);
   } catch (error) {
-    console.error('Error loading config:', error);
-    res.status(500).json({ error: 'Failed to load configuration' });
+    console.error('Error checking auth status:', error);
+    res.status(500).json({ error: error.message });
   }
 });
 
@@ -421,7 +582,13 @@ app.get('/api/gl-mappings/get', async (req, res) => {
     const { keyword } = req.query;
     
     if (!keyword) {
-      return res.json({ accountId: null });
+      // Return all mappings
+      const result = await pool.query('SELECT keyword, account_id FROM gl_mappings');
+      const mappings = {};
+      result.rows.forEach(row => {
+        mappings[row.keyword] = row.account_id;
+      });
+      return res.json({ mappings });
     }
     
     const result = await pool.query(
@@ -742,15 +909,15 @@ IMPORTANT for tax extraction:
   }
 });
 
-// Zoho API endpoints
+// Zoho API endpoints - now using getAccessToken()
 app.post('/api/zoho/vendor', async (req, res) => {
   try {
-    const { vendorName, config } = req.body;
+    const { vendorName } = req.body;
     
-    // Use environment variables if config not provided
-    const apiDomain = config?.apiDomain || process.env.ZOHO_API_DOMAIN;
-    const organizationId = config?.organizationId || process.env.ZOHO_ORGANIZATION_ID;
-    const accessToken = config?.accessToken || process.env.ZOHO_ACCESS_TOKEN;
+    // Get current valid access token
+    const accessToken = await getAccessToken();
+    const apiDomain = process.env.ZOHO_API_DOMAIN || 'https://www.zohoapis.com';
+    const organizationId = process.env.ZOHO_ORGANIZATION_ID;
     
     console.log('Creating/finding vendor:', vendorName);
     
@@ -819,12 +986,12 @@ app.post('/api/zoho/vendor', async (req, res) => {
 
 app.post('/api/zoho/bill', async (req, res) => {
   try {
-    const { billData, config } = req.body;
+    const { billData } = req.body;
     
-    // Use environment variables if config not provided
-    const apiDomain = config?.apiDomain || process.env.ZOHO_API_DOMAIN;
-    const organizationId = config?.organizationId || process.env.ZOHO_ORGANIZATION_ID;
-    const accessToken = config?.accessToken || process.env.ZOHO_ACCESS_TOKEN;
+    // Get current valid access token
+    const accessToken = await getAccessToken();
+    const apiDomain = process.env.ZOHO_API_DOMAIN || 'https://www.zohoapis.com';
+    const organizationId = process.env.ZOHO_ORGANIZATION_ID;
     
     console.log('Creating bill in Zoho Books...');
     
@@ -858,12 +1025,12 @@ app.post('/api/zoho/bill', async (req, res) => {
 // Attach file to Zoho Books bill
 app.post('/api/zoho/attach-file', async (req, res) => {
   try {
-    const { billId, fileName, fileData, config } = req.body;
+    const { billId, fileName, fileData } = req.body;
     
-    // Use environment variables if config not provided
-    const organizationId = config?.organizationId || process.env.ZOHO_ORGANIZATION_ID;
-    const accessToken = config?.accessToken || process.env.ZOHO_ACCESS_TOKEN;
-    const apiDomain = config?.apiDomain || process.env.ZOHO_API_DOMAIN;
+    // Get current valid access token
+    const accessToken = await getAccessToken();
+    const apiDomain = process.env.ZOHO_API_DOMAIN || 'https://www.zohoapis.com';
+    const organizationId = process.env.ZOHO_ORGANIZATION_ID;
     
     if (!billId || !fileName || !fileData) {
       return res.status(400).json({ error: 'Missing required fields' });
@@ -910,20 +1077,18 @@ app.post('/api/zoho/attach-file', async (req, res) => {
 
 app.post('/api/zoho/accounts', async (req, res) => {
   try {
-    const { organizationId, accessToken, apiDomain } = req.body;
-    
-    // Use environment variables if not provided
-    const orgId = organizationId || process.env.ZOHO_ORGANIZATION_ID;
-    const token = accessToken || process.env.ZOHO_ACCESS_TOKEN;
-    const domain = apiDomain || process.env.ZOHO_API_DOMAIN;
+    // Get current valid access token
+    const accessToken = await getAccessToken();
+    const apiDomain = process.env.ZOHO_API_DOMAIN || 'https://www.zohoapis.com';
+    const organizationId = process.env.ZOHO_ORGANIZATION_ID;
     
     console.log('Fetching chart of accounts from Zoho...');
     
     const response = await fetch(
-      `${domain}/books/v3/chartofaccounts?organization_id=${orgId}`,
+      `${apiDomain}/books/v3/chartofaccounts?organization_id=${organizationId}`,
       {
         headers: {
-          'Authorization': `Zoho-oauthtoken ${token}`
+          'Authorization': `Zoho-oauthtoken ${accessToken}`
         }
       }
     );
@@ -996,9 +1161,11 @@ app.post('/api/workdrive/mark-fetched', async (req, res) => {
 app.post('/api/workdrive/move-file', async (req, res) => {
   try {
     const { workdriveFileId, targetFolder } = req.body;
-    const accessToken = process.env.ZOHO_ACCESS_TOKEN;
+    
+    // Get current valid access token
+    const accessToken = await getAccessToken();
 
-    if (!workdriveFileId || !targetFolder || !accessToken) {
+    if (!workdriveFileId || !targetFolder) {
       return res.status(400).json({ error: 'Missing required parameters' });
     }
 
@@ -1080,5 +1247,10 @@ app.get('/health', (req, res) => {
 
 app.listen(PORT, () => {
   console.log(`Server running on port ${PORT}`);
-  console.log(`Environment variables loaded: ZOHO_ACCESS_TOKEN=${process.env.ZOHO_ACCESS_TOKEN ? 'Yes' : 'No'}`);
+  console.log('Zoho credentials configured:', {
+    hasRefreshToken: !!process.env.ZOHO_REFRESH_TOKEN,
+    hasClientId: !!process.env.ZOHO_CLIENT_ID,
+    hasClientSecret: !!process.env.ZOHO_CLIENT_SECRET,
+    hasOrganizationId: !!process.env.ZOHO_ORGANIZATION_ID
+  });
 });
