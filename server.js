@@ -849,7 +849,16 @@ app.post('/api/claude/extract', async (req, res) => {
               type: 'text',
               text: `Extract invoice information from this PDF and return ONLY a JSON object (no markdown, no explanation) with this exact structure:
 {
-  "vendorName": "vendor name",
+  "vendorName": "vendor/company name",
+  "vendorEmail": "email if visible, or null",
+  "vendorPhone": "phone number if visible, or null",
+  "vendorAddress": {
+    "street": "street address or null",
+    "city": "city or null",
+    "state": "state/province or null",
+    "zip": "postal/zip code or null",
+    "country": "country or null"
+  },
   "invoiceNumber": "invoice number",
   "invoiceDate": "YYYY-MM-DD",
   "dueDate": "YYYY-MM-DD",
@@ -873,6 +882,11 @@ app.post('/api/claude/extract', async (req, res) => {
   },
   "total": number
 }
+
+IMPORTANT for vendor information:
+- Extract the vendor/seller company name, NOT the buyer/bill-to name
+- Look for vendor email, phone, and address in the invoice header or footer
+- The vendor is the company SENDING the invoice, not receiving it
 
 IMPORTANT for tax extraction:
 - Look for GST, HST, PST, QST, or any sales tax line items on the invoice
@@ -974,10 +988,16 @@ app.post('/api/zoho/vendor/search', async (req, res) => {
   }
 });
 
-// Create new vendor
+// Create new vendor with full details
 app.post('/api/zoho/vendor/create', async (req, res) => {
   try {
-    const { vendorName } = req.body;
+    const { 
+      vendorName, 
+      email, 
+      phone, 
+      currency,
+      address 
+    } = req.body;
     
     // Get current valid access token
     const accessToken = await getAccessToken();
@@ -985,6 +1005,29 @@ app.post('/api/zoho/vendor/create', async (req, res) => {
     const organizationId = process.env.ZOHO_ORGANIZATION_ID;
     
     console.log('Creating new vendor:', vendorName);
+    
+    // Build vendor data
+    const vendorData = {
+      contact_name: vendorName,
+      contact_type: 'vendor',
+      language_code: 'en'
+    };
+    
+    // Add optional fields if provided
+    if (email) vendorData.email = email;
+    if (phone) vendorData.phone = phone;
+    if (currency) vendorData.currency_code = currency;
+    
+    // Add address if provided
+    if (address && (address.street || address.city || address.state || address.zip || address.country)) {
+      vendorData.billing_address = {
+        address: address.street || '',
+        city: address.city || '',
+        state: address.state || '',
+        zip: address.zip || '',
+        country: address.country || ''
+      };
+    }
     
     const createResponse = await fetch(
       `${apiDomain}/books/v3/contacts?organization_id=${organizationId}`,
@@ -994,10 +1037,7 @@ app.post('/api/zoho/vendor/create', async (req, res) => {
           'Authorization': `Zoho-oauthtoken ${accessToken}`,
           'Content-Type': 'application/json'
         },
-        body: JSON.stringify({
-          contact_name: vendorName,
-          contact_type: 'vendor'
-        })
+        body: JSON.stringify(vendorData)
       }
     );
 
