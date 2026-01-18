@@ -917,6 +917,108 @@ IMPORTANT for tax extraction:
 });
 
 // Zoho API endpoints - now using getAccessToken()
+
+// Search for vendor only (doesn't create)
+app.post('/api/zoho/vendor/search', async (req, res) => {
+  try {
+    const { vendorName } = req.body;
+    
+    // Get current valid access token
+    const accessToken = await getAccessToken();
+    const apiDomain = process.env.ZOHO_API_DOMAIN || 'https://www.zohoapis.com';
+    const organizationId = process.env.ZOHO_ORGANIZATION_ID;
+    
+    console.log('Searching for vendor:', vendorName);
+    
+    // Fetch all vendors
+    const searchResponse = await fetch(
+      `${apiDomain}/books/v3/contacts?organization_id=${organizationId}&contact_type=vendor`,
+      {
+        headers: {
+          'Authorization': `Zoho-oauthtoken ${accessToken}`
+        }
+      }
+    );
+
+    if (!searchResponse.ok) {
+      const errorText = await searchResponse.text();
+      console.error('Zoho search vendor error:', errorText);
+      return res.status(searchResponse.status).json({ error: errorText });
+    }
+
+    const searchData = await searchResponse.json();
+    
+    // Case-insensitive search for existing vendor
+    if (searchData.contacts && searchData.contacts.length > 0) {
+      const normalizedSearchName = vendorName.toLowerCase().trim();
+      const matchingVendor = searchData.contacts.find(contact => 
+        contact.contact_name.toLowerCase().trim() === normalizedSearchName
+      );
+      
+      if (matchingVendor) {
+        console.log(`Found existing vendor: ${matchingVendor.contact_name} (ID: ${matchingVendor.contact_id})`);
+        return res.json({ 
+          found: true, 
+          vendorId: matchingVendor.contact_id,
+          vendorName: matchingVendor.contact_name
+        });
+      }
+    }
+
+    // Not found
+    console.log('Vendor not found:', vendorName);
+    res.json({ found: false, vendorName: vendorName });
+  } catch (error) {
+    console.error('Error searching vendor:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Create new vendor
+app.post('/api/zoho/vendor/create', async (req, res) => {
+  try {
+    const { vendorName } = req.body;
+    
+    // Get current valid access token
+    const accessToken = await getAccessToken();
+    const apiDomain = process.env.ZOHO_API_DOMAIN || 'https://www.zohoapis.com';
+    const organizationId = process.env.ZOHO_ORGANIZATION_ID;
+    
+    console.log('Creating new vendor:', vendorName);
+    
+    const createResponse = await fetch(
+      `${apiDomain}/books/v3/contacts?organization_id=${organizationId}`,
+      {
+        method: 'POST',
+        headers: {
+          'Authorization': `Zoho-oauthtoken ${accessToken}`,
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({
+          contact_name: vendorName,
+          contact_type: 'vendor'
+        })
+      }
+    );
+
+    if (!createResponse.ok) {
+      const errorText = await createResponse.text();
+      console.error('Zoho create vendor error:', errorText);
+      return res.status(createResponse.status).json({ error: errorText });
+    }
+
+    const createData = await createResponse.json();
+    console.log('Created new vendor:', createData.contact.contact_id);
+    res.json({ 
+      vendorId: createData.contact.contact_id,
+      vendorName: createData.contact.contact_name
+    });
+  } catch (error) {
+    console.error('Error creating vendor:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
 app.post('/api/zoho/vendor', async (req, res) => {
   try {
     const { vendorName } = req.body;
@@ -979,6 +1081,36 @@ app.post('/api/zoho/vendor', async (req, res) => {
     if (!createResponse.ok) {
       const errorText = await createResponse.text();
       console.error('Zoho create vendor error:', errorText);
+      
+      // Check if error is "vendor already exists" (code 3062)
+      // This can happen with race conditions - retry search
+      if (errorText.includes('3062') || errorText.toLowerCase().includes('already exists')) {
+        console.log('Vendor already exists, retrying search...');
+        
+        // Retry fetching vendors and search again
+        const retryResponse = await fetch(
+          `${apiDomain}/books/v3/contacts?organization_id=${organizationId}&contact_type=vendor`,
+          {
+            headers: {
+              'Authorization': `Zoho-oauthtoken ${accessToken}`
+            }
+          }
+        );
+        
+        if (retryResponse.ok) {
+          const retryData = await retryResponse.json();
+          const normalizedName = vendorName.toLowerCase().trim();
+          const existingVendor = retryData.contacts?.find(contact => 
+            contact.contact_name.toLowerCase().trim() === normalizedName
+          );
+          
+          if (existingVendor) {
+            console.log(`Found existing vendor on retry: ${existingVendor.contact_name} (ID: ${existingVendor.contact_id})`);
+            return res.json({ vendorId: existingVendor.contact_id });
+          }
+        }
+      }
+      
       return res.status(createResponse.status).json({ error: errorText });
     }
 
