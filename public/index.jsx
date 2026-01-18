@@ -969,22 +969,16 @@ function InvoiceProcessor() {
                 )}
               </div>
               
-              {/* WorkDrive Integration Section */}
-              <div className="border-t pt-4 mt-4">
-                <h3 className="text-lg font-semibold text-gray-800 mb-3">📁 Zoho WorkDrive Auto-Import</h3>
-                <p className="text-xs text-gray-600 mb-4">
-                  WorkDrive integration is configured via environment variables on the server.
-                  Set WORKDRIVE_ENABLED=true and configure folder IDs in Railway.
-                </p>
-                
-                <div className={`p-3 rounded-lg ${config.workdriveEnabled ? 'bg-green-50 border border-green-200' : 'bg-gray-50 border border-gray-200'}`}>
-                  <p className={`text-sm ${config.workdriveEnabled ? 'text-green-800' : 'text-gray-600'}`}>
-                    {config.workdriveEnabled 
-                      ? '✓ WorkDrive Auto-Import is enabled' 
-                      : 'WorkDrive Auto-Import is disabled'}
-                  </p>
+              {/* WorkDrive Status */}
+              {config.workdriveEnabled && (
+                <div className="border-t pt-4 mt-4">
+                  <div className="p-3 bg-green-50 border border-green-200 rounded-lg">
+                    <p className="text-sm text-green-800">
+                      📁 <strong>WorkDrive Auto-Import is enabled</strong> - PDFs dropped in the configured folder will automatically appear in the queue.
+                    </p>
+                  </div>
                 </div>
-              </div>
+              )}
 
               <div className="flex justify-end">
                 <button
