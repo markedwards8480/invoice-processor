@@ -1,7 +1,10 @@
-const express = require('express');
-const cors = require('cors');
-const fetch = require('node-fetch');
-const { Pool } = require('pg');
+import express from 'express';
+import cors from 'cors';
+import fetch from 'node-fetch';
+import pg from 'pg';
+import FormData from 'form-data';
+
+const { Pool } = pg;
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -872,7 +875,6 @@ app.post('/api/zoho/attach-file', async (req, res) => {
     const fileBuffer = Buffer.from(fileData, 'base64');
     
     // Create form data for multipart upload
-    const FormData = require('form-data');
     const form = new FormData();
     form.append('attachment', fileBuffer, {
       filename: fileName,
