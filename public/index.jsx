@@ -33,6 +33,8 @@ function InvoiceProcessor() {
   const [showBatchConfirm, setShowBatchConfirm] = useState(false);
   const [batchToUpload, setBatchToUpload] = useState([]);
   const [selectedFiles, setSelectedFiles] = useState(new Set());
+  const [isConnected, setIsConnected] = useState(false);
+  const [loadingAccounts, setLoadingAccounts] = useState(false);
   
   // Transaction history filters
   const [searchTerm, setSearchTerm] = useState('');
@@ -46,10 +48,13 @@ function InvoiceProcessor() {
   useEffect(() => {
     const loadServerData = async () => {
       try {
-        const configRes = await fetch('/api/config/load');
+        // Load config from environment variables via server
+        const configRes = await fetch('/api/config');
         if (configRes.ok) {
           const serverConfig = await configRes.json();
           setConfig(serverConfig);
+          // Check if connected (has access token)
+          setIsConnected(!!serverConfig.accessToken);
         }
         
         const mappingsRes = await fetch('/api/gl-mappings/get');
@@ -271,121 +276,29 @@ function InvoiceProcessor() {
     }
   };
 
-  // Save config to server
-  const saveConfig = async () => {
-    try {
-      const response = await fetch('/api/config/save', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(config)
-      });
-      
-      if (response.ok) {
-        setShowSettings(false);
-        addToLog('success', 'Settings saved successfully');
-        fetchAccounts();
-      } else {
-        addToLog('error', 'Failed to save settings');
-      }
-    } catch (error) {
-      addToLog('error', `Failed to save settings: ${error.message}`);
-    }
-  };
-
-  // Fetch Chart of Accounts from Zoho Books
-  // Reload config from server (useful when tokens have been refreshed on backend)
-  const reloadConfigFromServer = async () => {
-    try {
-      const response = await fetch('/api/config');
-      if (response.ok) {
-        const data = await response.json();
-        const serverConfig = {};
-        
-        for (const [key, value] of Object.entries(data.config)) {
-          try {
-            serverConfig[key] = JSON.parse(value);
-          } catch (e) {
-            serverConfig[key] = value;
-          }
-        }
-        
-        setConfig(prev => ({
-          ...prev,
-          ...serverConfig
-        }));
-        
-        return serverConfig;
-      }
-    } catch (error) {
-      console.error('Failed to reload config:', error);
-    }
-    return null;
-  };
-
+  // Fetch Chart of Accounts from Zoho Books (using server-side credentials)
   const fetchAccounts = async () => {
-    if (!config.organizationId || !config.accessToken) {
-      return;
-    }
-
     try {
+      setLoadingAccounts(true);
       addToLog('info', 'Fetching chart of accounts from Zoho Books...');
       
+      // Call the server endpoint - it will use environment variables
       const response = await fetch('/api/zoho/accounts', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          organizationId: config.organizationId,
-          accessToken: config.accessToken,
-          apiDomain: config.apiDomain
-        })
+        body: JSON.stringify({})  // Server will use env vars
       });
 
-      // If unauthorized, try reloading config from server (backend might have refreshed)
-      if (response.status === 401) {
-        addToLog('warning', 'Token expired, reloading fresh config from server...');
-        const newConfig = await reloadConfigFromServer();
-        
-        if (newConfig && newConfig.accessToken) {
-          // Retry with fresh token
-          const retryResponse = await fetch('/api/zoho/accounts', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              organizationId: newConfig.organizationId || config.organizationId,
-              accessToken: newConfig.accessToken,
-              apiDomain: newConfig.apiDomain || config.apiDomain
-            })
-          });
-          
-          if (!retryResponse.ok) {
-            throw new Error('Failed to fetch accounts even after reloading config');
-          }
-          
-          const data = await retryResponse.json();
-          const loadedAccounts = data.accounts || [];
-          setAccounts(loadedAccounts);
-          
-          await fetch('/api/accounts/cache', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ accounts: loadedAccounts })
-          });
-          
-          addToLog('success', `✓ Loaded ${loadedAccounts.length} accounts from Zoho Books (after token refresh)`);
-          return;
-        }
-        
-        throw new Error('Token expired and could not be refreshed. Please update your credentials in Settings.');
-      }
-
       if (!response.ok) {
-        throw new Error('Failed to fetch accounts');
+        const errorText = await response.text();
+        throw new Error(`Failed to fetch accounts: ${errorText}`);
       }
 
       const data = await response.json();
       const loadedAccounts = data.accounts || [];
       setAccounts(loadedAccounts);
       
+      // Cache accounts in database
       await fetch('/api/accounts/cache', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -396,10 +309,11 @@ function InvoiceProcessor() {
       
     } catch (error) {
       addToLog('error', `Failed to load accounts: ${error.message}`);
+    } finally {
+      setLoadingAccounts(false);
     }
   };
 
-  // Auto-suggest account based on line item description
   // Auto-suggest account based on line item description and vendor
   const suggestAccount = (description, vendorName = '') => {
     const desc = description.toLowerCase();
@@ -513,59 +427,6 @@ function InvoiceProcessor() {
     }
   };
 
-  // Automatically refresh access token when expired
-  const refreshAccessToken = async () => {
-    if (!config.refreshToken || !config.clientId || !config.clientSecret) {
-      addToLog('error', 'Cannot refresh token: Missing refresh token or client credentials');
-      return null;
-    }
-
-    try {
-      addToLog('info', 'Refreshing access token...');
-
-      const response = await fetch('https://accounts.zoho.com/oauth/v2/token', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/x-www-form-urlencoded',
-        },
-        body: new URLSearchParams({
-          refresh_token: config.refreshToken,
-          client_id: config.clientId,
-          client_secret: config.clientSecret,
-          grant_type: 'refresh_token'
-        })
-      });
-
-      if (!response.ok) {
-        throw new Error('Failed to refresh token');
-      }
-
-      const data = await response.json();
-      
-      if (data.access_token) {
-        const newConfig = {
-          ...config,
-          accessToken: data.access_token
-        };
-        setConfig(newConfig);
-        
-        await fetch('/api/config/save', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(newConfig)
-        });
-        
-        addToLog('success', '✓ Access token refreshed successfully');
-        return data.access_token;
-      } else {
-        throw new Error('No access token in response');
-      }
-    } catch (error) {
-      addToLog('error', `Failed to refresh access token: ${error.message}. Please update your credentials in Settings.`);
-      return null;
-    }
-  };
-
   // Add entry to activity log
   const addToLog = (type, message, details = null) => {
     const entry = {
@@ -598,7 +459,6 @@ function InvoiceProcessor() {
   };
 
   // Extract data from PDF
-  // Extract data from PDF
   const extractInvoiceData = async (fileObj) => {
     // If file already has base64Data (from WorkDrive), use it directly
     if (fileObj.base64Data) {
@@ -628,6 +488,9 @@ function InvoiceProcessor() {
       reader.onload = async (event) => {
         try {
           const base64Data = event.target.result.split(',')[1];
+          
+          // Store fileData for attachment
+          fileObj.fileData = base64Data;
           
           const response = await fetch('/api/claude/extract', {
             method: 'POST',
@@ -705,7 +568,7 @@ function InvoiceProcessor() {
   };
 
   // Upload to Zoho Books
-  const uploadToZoho = async (fileObj, retryCount = 0) => {
+  const uploadToZoho = async (fileObj) => {
     if (!fileObj.extractedData) {
       throw new Error('No data extracted');
     }
@@ -715,26 +578,14 @@ function InvoiceProcessor() {
     try {
       addToLog('info', `Searching for vendor: ${data.vendorName}...`);
       
+      // Server will use environment variables for credentials
       const vendorResponse = await fetch('/api/zoho/vendor', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          vendorName: data.vendorName,
-          config: config
+          vendorName: data.vendorName
         })
       });
-
-      if (vendorResponse.status === 401 && retryCount === 0) {
-        addToLog('warning', 'Token expired, reloading fresh config from server...');
-        const newConfig = await reloadConfigFromServer();
-        
-        if (newConfig && newConfig.accessToken) {
-          // Update fileObj with new config and retry
-          return uploadToZoho(fileObj, 1);
-        } else {
-          throw new Error('Access token expired. Please update your token in Settings.');
-        }
-      }
 
       if (!vendorResponse.ok) {
         const errorText = await vendorResponse.text();
@@ -773,8 +624,7 @@ function InvoiceProcessor() {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          billData,
-          config: config
+          billData
         })
       });
 
@@ -789,7 +639,7 @@ function InvoiceProcessor() {
       addToLog('success', `✓ Invoice ${data.invoiceNumber} uploaded successfully! Amount: $${data.total?.toFixed(2) || '0.00'} ${data.currency || 'CAD'}`);
 
       // ATTACH PDF TO BILL
-      if (billId && fileObj.fileData) {
+      if (billId && (fileObj.fileData || fileObj.base64Data)) {
         try {
           addToLog('info', `📎 Attaching PDF to bill...`);
           
@@ -799,8 +649,7 @@ function InvoiceProcessor() {
             body: JSON.stringify({
               billId: billId,
               fileName: fileObj.file?.name || 'invoice.pdf',
-              fileData: fileObj.fileData, // Base64 data
-              config: config
+              fileData: fileObj.fileData || fileObj.base64Data
             })
           });
 
@@ -931,8 +780,7 @@ function InvoiceProcessor() {
               headers: { 'Content-Type': 'application/json' },
               body: JSON.stringify({
                 workdriveFileId: file.workdriveFileId,
-                targetFolder: config.workdriveProcessedFolderId,
-                accessToken: config.accessToken
+                targetFolder: config.workdriveProcessedFolderId
               })
             });
             
@@ -960,8 +808,7 @@ function InvoiceProcessor() {
               headers: { 'Content-Type': 'application/json' },
               body: JSON.stringify({
                 workdriveFileId: file.workdriveFileId,
-                targetFolder: config.workdriveFailedFolderId,
-                accessToken: config.accessToken
+                targetFolder: config.workdriveFailedFolderId
               })
             });
             
@@ -1074,222 +921,79 @@ function InvoiceProcessor() {
           </div>
         </div>
 
-        {/* Settings Panel */}
+        {/* Settings Panel - Simplified for server-side credentials */}
         {showSettings && (
           <div className="bg-white rounded-lg shadow-lg p-6 mb-6">
-            <h2 className="text-xl font-semibold mb-4">Zoho Books Configuration</h2>
+            <h2 className="text-xl font-semibold mb-4">Settings</h2>
             <div className="space-y-4">
-              <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">
-                  API Domain
-                </label>
-                <input
-                  type="text"
-                  value={config.apiDomain}
-                  onChange={(e) => setConfig({...config, apiDomain: e.target.value})}
-                  className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-emerald-500"
-                  placeholder="https://www.zohoapis.com"
-                />
-                <p className="text-xs text-gray-500 mt-1">
-                  US/Global: https://www.zohoapis.com | Europe: https://www.zohoapis.eu
-                </p>
-              </div>
-              <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">
-                  Organization ID
-                </label>
-                <input
-                  type="text"
-                  value={config.organizationId}
-                  onChange={(e) => setConfig({...config, organizationId: e.target.value})}
-                  className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-emerald-500"
-                  placeholder="Enter your Zoho Organization ID"
-                />
-              </div>
-              <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">
-                  Access Token
-                </label>
-                <input
-                  type="password"
-                  value={config.accessToken}
-                  onChange={(e) => setConfig({...config, accessToken: e.target.value})}
-                  className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-emerald-500"
-                  placeholder="Enter your Zoho Access Token"
-                />
-              </div>
               
-              <div className="border-t pt-4 mt-4">
-                <h3 className="text-sm font-semibold text-gray-700 mb-3">Auto-Refresh Settings (Optional)</h3>
-                <p className="text-xs text-gray-600 mb-3">
-                  Enable automatic token refresh by providing your refresh token and client credentials. 
-                  This prevents "token expired" errors.
-                </p>
-                
-                <div className="space-y-3">
+              {/* Connection Status */}
+              <div className={`p-4 rounded-lg border ${isConnected ? 'bg-green-50 border-green-200' : 'bg-yellow-50 border-yellow-200'}`}>
+                <div className="flex items-center gap-2">
+                  <span className={`text-2xl`}>{isConnected ? '✅' : '⚠️'}</span>
                   <div>
-                    <label className="block text-sm font-medium text-gray-700 mb-1">
-                      Refresh Token
-                    </label>
-                    <input
-                      type="password"
-                      value={config.refreshToken}
-                      onChange={(e) => setConfig({...config, refreshToken: e.target.value})}
-                      className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-emerald-500"
-                      placeholder="1000.xxx..."
-                    />
-                  </div>
-                  <div>
-                    <label className="block text-sm font-medium text-gray-700 mb-1">
-                      Client ID
-                    </label>
-                    <input
-                      type="text"
-                      value={config.clientId}
-                      onChange={(e) => setConfig({...config, clientId: e.target.value})}
-                      className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-emerald-500"
-                      placeholder="1000.ES86MGZHSXB975Y195X46VW7SBE3FF"
-                    />
-                  </div>
-                  <div>
-                    <label className="block text-sm font-medium text-gray-700 mb-1">
-                      Client Secret
-                    </label>
-                    <input
-                      type="password"
-                      value={config.clientSecret}
-                      onChange={(e) => setConfig({...config, clientSecret: e.target.value})}
-                      className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-emerald-500"
-                      placeholder="7abf2fc01230a4b9a0c08f4837aef870f231973226"
-                    />
+                    <p className={`font-medium ${isConnected ? 'text-green-800' : 'text-yellow-800'}`}>
+                      {isConnected ? 'Connected to Zoho Books' : 'Not Connected'}
+                    </p>
+                    <p className="text-sm text-gray-600">
+                      {isConnected 
+                        ? 'Credentials are configured on the server.' 
+                        : 'Please configure ZOHO_ACCESS_TOKEN and other credentials in Railway environment variables.'}
+                    </p>
                   </div>
                 </div>
+              </div>
+
+              {/* GL Accounts Section */}
+              <div className="border-t pt-4">
+                <h3 className="text-lg font-semibold text-gray-800 mb-3">📊 GL Accounts</h3>
+                <div className="flex items-center gap-4">
+                  <button
+                    onClick={fetchAccounts}
+                    disabled={loadingAccounts}
+                    className="px-6 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition disabled:bg-blue-300"
+                  >
+                    {loadingAccounts ? '⏳ Loading...' : '🔄 Load GL Accounts'}
+                  </button>
+                  {accounts.length > 0 && (
+                    <span className="text-green-600 font-medium">
+                      ✓ {accounts.length} accounts loaded
+                    </span>
+                  )}
+                </div>
+                {accounts.length === 0 && (
+                  <p className="text-sm text-gray-500 mt-2">
+                    Click "Load GL Accounts" to fetch your chart of accounts from Zoho Books. 
+                    This is required for assigning GL codes to line items.
+                  </p>
+                )}
               </div>
               
               {/* WorkDrive Integration Section */}
               <div className="border-t pt-4 mt-4">
                 <h3 className="text-lg font-semibold text-gray-800 mb-3">📁 Zoho WorkDrive Auto-Import</h3>
                 <p className="text-xs text-gray-600 mb-4">
-                  Automatically import invoices from a Zoho WorkDrive folder. Drop PDFs in the "New Invoices" folder and they'll appear in the queue automatically.
+                  WorkDrive integration is configured via environment variables on the server.
+                  Set WORKDRIVE_ENABLED=true and configure folder IDs in Railway.
                 </p>
                 
-                <div className="space-y-3">
-                  <div className="flex items-center gap-3">
-                    <input
-                      type="checkbox"
-                      id="workdriveEnabled"
-                      checked={config.workdriveEnabled}
-                      onChange={(e) => setConfig({...config, workdriveEnabled: e.target.checked})}
-                      className="rounded"
-                    />
-                    <label htmlFor="workdriveEnabled" className="text-sm font-medium text-gray-700">
-                      Enable WorkDrive Auto-Import
-                    </label>
-                  </div>
-                  
-                  {config.workdriveEnabled && (
-                    <>
-                      <div>
-                        <label className="block text-sm font-medium text-gray-700 mb-1">
-                          Team ID
-                        </label>
-                        <input
-                          type="text"
-                          value={config.workdriveTeamId}
-                          onChange={(e) => setConfig({...config, workdriveTeamId: e.target.value})}
-                          className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-emerald-500"
-                          placeholder="Find in WorkDrive URL"
-                        />
-                      </div>
-                      
-                      <div>
-                        <label className="block text-sm font-medium text-gray-700 mb-1">
-                          Workspace ID
-                        </label>
-                        <input
-                          type="text"
-                          value={config.workdriveWorkspaceId}
-                          onChange={(e) => setConfig({...config, workdriveWorkspaceId: e.target.value})}
-                          className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-emerald-500"
-                          placeholder="Find in WorkDrive URL after /ws/"
-                        />
-                      </div>
-                      
-                      <div>
-                        <label className="block text-sm font-medium text-gray-700 mb-1">
-                          "New Invoices" Folder ID
-                        </label>
-                        <input
-                          type="text"
-                          value={config.workdriveNewInvoicesFolderId}
-                          onChange={(e) => setConfig({...config, workdriveNewInvoicesFolderId: e.target.value})}
-                          className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-emerald-500"
-                          placeholder="Folder where users drop invoices"
-                        />
-                      </div>
-                      
-                      <div>
-                        <label className="block text-sm font-medium text-gray-700 mb-1">
-                          "Processed" Folder ID (Optional)
-                        </label>
-                        <input
-                          type="text"
-                          value={config.workdriveProcessedFolderId}
-                          onChange={(e) => setConfig({...config, workdriveProcessedFolderId: e.target.value})}
-                          className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-emerald-500"
-                          placeholder="Successfully uploaded invoices move here"
-                        />
-                      </div>
-                      
-                      <div>
-                        <label className="block text-sm font-medium text-gray-700 mb-1">
-                          "Failed" Folder ID (Optional)
-                        </label>
-                        <input
-                          type="text"
-                          value={config.workdriveFailedFolderId}
-                          onChange={(e) => setConfig({...config, workdriveFailedFolderId: e.target.value})}
-                          className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-emerald-500"
-                          placeholder="Failed invoices move here"
-                        />
-                      </div>
-                      
-                      <div className="p-3 bg-blue-50 border border-blue-200 rounded-lg">
-                        <p className="text-xs text-blue-800">
-                          <strong>💡 How to find Folder IDs:</strong><br/>
-                          1. Open the folder in WorkDrive<br/>
-                          2. Look at the URL: workdrive.zoho.com/.../<strong>folder/abc123xyz</strong><br/>
-                          3. Copy the ID after "folder/" (e.g., abc123xyz)
-                        </p>
-                      </div>
-                    </>
-                  )}
-                </div>
-              </div>
-              
-              <div className="flex gap-3">
-                <button
-                  onClick={saveConfig}
-                  className="flex-1 px-6 py-2 bg-emerald-600 text-white rounded-lg hover:bg-emerald-700 transition"
-                >
-                  Save Settings
-                </button>
-                <button
-                  onClick={fetchAccounts}
-                  className="px-6 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition"
-                  disabled={!config.organizationId || !config.accessToken}
-                >
-                  Load GL Accounts
-                </button>
-              </div>
-              
-              {accounts.length > 0 && (
-                <div className="mt-4 p-3 bg-green-50 border border-green-200 rounded-lg">
-                  <p className="text-sm text-green-800">
-                    ✓ {accounts.length} GL accounts loaded from Zoho Books
+                <div className={`p-3 rounded-lg ${config.workdriveEnabled ? 'bg-green-50 border border-green-200' : 'bg-gray-50 border border-gray-200'}`}>
+                  <p className={`text-sm ${config.workdriveEnabled ? 'text-green-800' : 'text-gray-600'}`}>
+                    {config.workdriveEnabled 
+                      ? '✓ WorkDrive Auto-Import is enabled' 
+                      : 'WorkDrive Auto-Import is disabled'}
                   </p>
                 </div>
-              )}
+              </div>
+
+              <div className="flex justify-end">
+                <button
+                  onClick={() => setShowSettings(false)}
+                  className="px-6 py-2 bg-gray-200 text-gray-700 rounded-lg hover:bg-gray-300 transition"
+                >
+                  Close
+                </button>
+              </div>
             </div>
           </div>
         )}
@@ -1315,7 +1019,7 @@ function InvoiceProcessor() {
                   : 'text-gray-600 hover:text-gray-800'
               }`}
             >
-              📊 Transaction History ({transactions.length})
+              📊 Transaction History ({transactionTotal})
             </button>
           </div>
         </div>
@@ -1351,104 +1055,101 @@ function InvoiceProcessor() {
               {files.length > 0 && (
                 <div className="mt-6">
                   <div className="flex justify-between items-center mb-3">
+                    <h3 className="font-medium">Queue ({files.length})</h3>
                     <div className="flex items-center gap-2">
-                      <h3 className="font-semibold">Queue ({files.length})</h3>
-                      {files.some(f => f.status === 'extracted') && (
-                        <label className="flex items-center gap-1 text-sm cursor-pointer">
-                          <input
-                            type="checkbox"
-                            checked={selectedFiles.size === files.filter(f => f.status === 'extracted').length && files.filter(f => f.status === 'extracted').length > 0}
-                            onChange={toggleSelectAll}
-                            className="rounded"
-                          />
-                          <span className="text-gray-600">Select all ready</span>
-                        </label>
-                      )}
-                    </div>
-                    <div className="flex gap-2">
-                      <button
-                        onClick={processAllFiles}
-                        disabled={processing || !files.some(f => f.status === 'pending')}
-                        className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition disabled:bg-gray-300"
-                      >
-                        {processing ? 'Processing...' : 'Process All'}
-                      </button>
-                      <button
-                        onClick={showBatchConfirmation}
-                        disabled={processing || selectedCount === 0}
-                        className="px-4 py-2 bg-emerald-600 text-white rounded-lg hover:bg-emerald-700 transition disabled:bg-gray-300"
-                      >
-                        {selectedCount > 0 ? `Upload Selected (${selectedCount})` : 'Upload Selected'}
-                      </button>
+                      <label className="text-sm text-gray-600 flex items-center gap-1">
+                        <input
+                          type="checkbox"
+                          checked={selectedFiles.size === files.filter(f => f.status === 'extracted').length && files.filter(f => f.status === 'extracted').length > 0}
+                          onChange={toggleSelectAll}
+                          className="rounded"
+                        />
+                        Select all ready
+                      </label>
                     </div>
                   </div>
                   
-                  <div className="space-y-2 max-h-96 overflow-y-auto">
-                    {files.map(file => (
-                      <div
-                        key={file.id}
-                        className={`p-3 rounded-lg border ${
-                          file.status === 'success' ? 'bg-green-50 border-green-200' :
-                          file.status === 'error' ? 'bg-red-50 border-red-200' :
-                          file.status === 'extracted' && file.isDuplicate ? 'bg-yellow-50 border-yellow-400' :
-                          file.status === 'extracted' ? 'bg-blue-50 border-blue-200' :
-                          file.status === 'processing' ? 'bg-yellow-50 border-yellow-200' :
-                          'bg-gray-50 border-gray-200'
-                        }`}
-                      >
-                        <div className="flex justify-between items-start">
-                          <div className="flex items-start gap-2 flex-1">
-                            {file.status === 'extracted' && (
-                              <input
-                                type="checkbox"
-                                checked={selectedFiles.has(file.id)}
-                                onChange={() => toggleFileSelection(file.id)}
-                                className="mt-1 rounded"
-                              />
+                  <div className="flex gap-2 mb-4">
+                    <button
+                      onClick={processAllFiles}
+                      disabled={processing || files.filter(f => f.status === 'pending').length === 0}
+                      className="px-4 py-2 bg-emerald-600 text-white rounded-lg hover:bg-emerald-700 transition disabled:bg-gray-300 disabled:cursor-not-allowed"
+                    >
+                      {processing ? 'Processing...' : 'Process All'}
+                    </button>
+                    <button
+                      onClick={showBatchConfirmation}
+                      disabled={processing || selectedCount === 0}
+                      className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition disabled:bg-gray-300 disabled:cursor-not-allowed"
+                    >
+                      Upload Selected ({selectedCount})
+                    </button>
+                  </div>
+                  
+                  <div className="space-y-2 max-h-80 overflow-y-auto">
+                    {files.map(fileObj => (
+                      <div key={fileObj.id} className={`p-3 border rounded-lg flex items-center justify-between ${
+                        fileObj.isDuplicate ? 'border-yellow-400 bg-yellow-50' : 
+                        fileObj.status === 'success' ? 'border-green-400 bg-green-50' :
+                        fileObj.status === 'error' ? 'border-red-400 bg-red-50' :
+                        'border-gray-200'
+                      }`}>
+                        <div className="flex items-center gap-3">
+                          {fileObj.status === 'extracted' && (
+                            <input
+                              type="checkbox"
+                              checked={selectedFiles.has(fileObj.id)}
+                              onChange={() => toggleFileSelection(fileObj.id)}
+                              className="rounded"
+                            />
+                          )}
+                          <div>
+                            <p className="font-medium text-sm">{fileObj.file.name}</p>
+                            {fileObj.extractedData && (
+                              <p className="text-xs text-gray-500">
+                                {fileObj.extractedData.vendorName} | Invoice #{fileObj.extractedData.invoiceNumber} | ${fileObj.extractedData.total?.toFixed(2) || '0.00'}
+                              </p>
                             )}
-                            <div className="flex-1">
-                              <p className="font-medium text-sm truncate">{file.file.name}</p>
-                              {file.extractedData && (
-                                <>
-                                  <p className="text-xs text-gray-600 mt-1">
-                                    {file.extractedData.vendorName} | Invoice #{file.extractedData.invoiceNumber} | ${file.extractedData.total?.toFixed(2)}
-                                  </p>
-                                  {file.isDuplicate && (
-                                    <p className="text-xs text-yellow-700 font-medium mt-1">
-                                      ⚠️ Possible duplicate - uploaded {new Date(file.duplicateInfo.processed_at).toLocaleDateString()}
-                                    </p>
-                                  )}
-                                </>
-                              )}
-                              {file.error && (
-                                <p className="text-xs text-red-600 mt-1">{file.error}</p>
-                              )}
-                            </div>
+                            {fileObj.isDuplicate && (
+                              <p className="text-xs text-yellow-700">
+                                ⚠️ Possible duplicate - uploaded {new Date(fileObj.duplicateInfo?.processed_at).toLocaleDateString()}
+                              </p>
+                            )}
+                            {fileObj.error && (
+                              <p className="text-xs text-red-600">{fileObj.error}</p>
+                            )}
                           </div>
-                          <div className="flex items-center gap-2">
-                            <span className="text-xs px-2 py-1 rounded">
-                              {file.status === 'success' && '✓ Uploaded'}
-                              {file.status === 'error' && '✗ Failed'}
-                              {file.status === 'extracted' && '📝 Ready'}
-                              {file.status === 'processing' && '⏳ Processing'}
-                              {file.status === 'pending' && '⋯ Pending'}
-                            </span>
-                            {file.status === 'extracted' && (
+                        </div>
+                        <div className="flex items-center gap-2">
+                          {fileObj.status === 'pending' && (
+                            <span className="text-gray-500 text-sm">Pending</span>
+                          )}
+                          {fileObj.status === 'extracting' && (
+                            <span className="text-blue-500 text-sm">Extracting...</span>
+                          )}
+                          {fileObj.status === 'extracted' && (
+                            <>
+                              <span className="text-emerald-500 text-sm">🎯 Ready</span>
                               <button
-                                onClick={() => { setCurrentPreview(file); setEditMode(true); }}
-                                className="text-xs px-2 py-1 bg-blue-600 text-white rounded hover:bg-blue-700"
+                                onClick={() => { setCurrentPreview(fileObj); setEditMode(true); }}
+                                className="px-2 py-1 bg-blue-100 text-blue-700 rounded text-xs hover:bg-blue-200"
                               >
                                 Review
                               </button>
-                            )}
-                            <button
-                              onClick={() => setFiles(prev => prev.filter(f => f.id !== file.id))}
-                              className="text-gray-400 hover:text-red-600 text-lg font-bold"
-                              title="Remove from queue"
-                            >
-                              ×
-                            </button>
-                          </div>
+                            </>
+                          )}
+                          {fileObj.status === 'success' && (
+                            <span className="text-green-600 text-sm">✓ Uploaded</span>
+                          )}
+                          {fileObj.status === 'error' && (
+                            <span className="text-red-500 text-sm">✗ Failed</span>
+                          )}
+                          <button
+                            onClick={() => setFiles(files.filter(f => f.id !== fileObj.id))}
+                            className="text-gray-400 hover:text-red-500"
+                          >
+                            ×
+                          </button>
                         </div>
                       </div>
                     ))}
@@ -1461,42 +1162,33 @@ function InvoiceProcessor() {
             <div className="bg-white rounded-lg shadow-lg p-6">
               <div className="flex justify-between items-center mb-4">
                 <h2 className="text-xl font-semibold">Activity Log</h2>
-                <button
+                <button 
                   onClick={clearLog}
-                  className="text-xs px-3 py-1 bg-gray-100 hover:bg-gray-200 rounded transition"
+                  className="text-sm text-gray-500 hover:text-gray-700"
                 >
                   Clear
                 </button>
               </div>
               
-              <div className="space-y-2 max-h-[500px] overflow-y-auto">
-                {activityLog.length === 0 ? (
-                  <p className="text-gray-500 text-sm text-center py-8">No activity yet</p>
-                ) : (
-                  activityLog.map(entry => (
-                    <div
-                      key={entry.id}
-                      className={`p-3 rounded-lg text-sm ${
-                        entry.type === 'success' ? 'bg-green-50 border-l-4 border-green-500' :
-                        entry.type === 'error' ? 'bg-red-50 border-l-4 border-red-500' :
-                        entry.type === 'warning' ? 'bg-yellow-50 border-l-4 border-yellow-500' :
-                        'bg-blue-50 border-l-4 border-blue-500'
-                      }`}
-                    >
-                      <div className="flex justify-between items-start mb-1">
-                        <span className="font-medium">
-                          {entry.type === 'success' && '✓ '}
-                          {entry.type === 'error' && '✗ '}
-                          {entry.type === 'warning' && '⚠ '}
-                          {entry.type === 'info' && 'ℹ '}
-                          {entry.message}
-                        </span>
-                        <span className="text-xs text-gray-500">
-                          {new Date(entry.timestamp).toLocaleTimeString()}
-                        </span>
-                      </div>
-                    </div>
-                  ))
+              <div className="space-y-2 max-h-96 overflow-y-auto">
+                {activityLog.map(entry => (
+                  <div 
+                    key={entry.id} 
+                    className={`p-3 rounded-lg border-l-4 ${
+                      entry.type === 'success' ? 'bg-green-50 border-green-500' :
+                      entry.type === 'error' ? 'bg-red-50 border-red-500' :
+                      entry.type === 'warning' ? 'bg-yellow-50 border-yellow-500' :
+                      'bg-blue-50 border-blue-500'
+                    }`}
+                  >
+                    <p className="text-sm">{entry.message}</p>
+                    <p className="text-xs text-gray-500 mt-1">
+                      {new Date(entry.timestamp).toLocaleTimeString()}
+                    </p>
+                  </div>
+                ))}
+                {activityLog.length === 0 && (
+                  <p className="text-gray-500 text-center py-8">No activity yet</p>
                 )}
               </div>
             </div>
@@ -1504,271 +1196,157 @@ function InvoiceProcessor() {
         ) : (
           /* Transaction History Tab */
           <div className="bg-white rounded-lg shadow-lg p-6">
-            <div className="flex justify-between items-center mb-6">
+            <div className="flex justify-between items-center mb-4">
               <h2 className="text-xl font-semibold">Transaction History</h2>
               <button
                 onClick={exportToCSV}
                 disabled={transactions.length === 0}
                 className="px-4 py-2 bg-emerald-600 text-white rounded-lg hover:bg-emerald-700 transition disabled:bg-gray-300"
               >
-                📥 Export to CSV
+                📥 Export CSV
               </button>
             </div>
             
-            {/* Search and Filters */}
-            <div className="mb-6 p-4 bg-gray-50 rounded-lg">
-              <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-4">
-                <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-1">
-                    Search (Vendor or Invoice #)
-                  </label>
-                  <input
-                    type="text"
-                    value={searchTerm}
-                    onChange={(e) => setSearchTerm(e.target.value)}
-                    onKeyPress={(e) => e.key === 'Enter' && searchTransactions()}
-                    className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-emerald-500"
-                    placeholder="Search..."
-                  />
-                </div>
-                
-                <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-1">
-                    Status
-                  </label>
-                  <select
-                    value={statusFilter}
-                    onChange={(e) => setStatusFilter(e.target.value)}
-                    className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-emerald-500"
-                  >
-                    <option value="">All</option>
-                    <option value="success">Success</option>
-                    <option value="error">Failed</option>
-                  </select>
-                </div>
-                
-                <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-1">
-                    Date From
-                  </label>
-                  <input
-                    type="date"
-                    value={dateFrom}
-                    onChange={(e) => setDateFrom(e.target.value)}
-                    className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-emerald-500"
-                  />
-                </div>
-                
-                <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-1">
-                    Date To
-                  </label>
-                  <input
-                    type="date"
-                    value={dateTo}
-                    onChange={(e) => setDateTo(e.target.value)}
-                    className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-emerald-500"
-                  />
-                </div>
-                
-                <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-1">
-                    Min Amount
-                  </label>
-                  <input
-                    type="number"
-                    step="0.01"
-                    value={minAmount}
-                    onChange={(e) => setMinAmount(e.target.value)}
-                    className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-emerald-500"
-                    placeholder="0.00"
-                  />
-                </div>
-                
-                <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-1">
-                    Max Amount
-                  </label>
-                  <input
-                    type="number"
-                    step="0.01"
-                    value={maxAmount}
-                    onChange={(e) => setMaxAmount(e.target.value)}
-                    className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-emerald-500"
-                    placeholder="0.00"
-                  />
-                </div>
-              </div>
-              
-              <div className="flex gap-3">
-                <button
-                  onClick={searchTransactions}
-                  className="px-6 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition"
-                >
-                  🔍 Search
-                </button>
-                <button
-                  onClick={clearFilters}
-                  className="px-6 py-2 bg-gray-300 text-gray-700 rounded-lg hover:bg-gray-400 transition"
-                >
-                  Clear Filters
-                </button>
-              </div>
+            {/* Filters */}
+            <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-6 gap-3 mb-4 p-4 bg-gray-50 rounded-lg">
+              <input
+                type="text"
+                placeholder="Search vendor/invoice..."
+                value={searchTerm}
+                onChange={(e) => setSearchTerm(e.target.value)}
+                className="px-3 py-2 border border-gray-300 rounded-lg text-sm"
+              />
+              <select
+                value={statusFilter}
+                onChange={(e) => setStatusFilter(e.target.value)}
+                className="px-3 py-2 border border-gray-300 rounded-lg text-sm"
+              >
+                <option value="">All Status</option>
+                <option value="success">Success</option>
+                <option value="error">Error</option>
+              </select>
+              <input
+                type="date"
+                placeholder="From date"
+                value={dateFrom}
+                onChange={(e) => setDateFrom(e.target.value)}
+                className="px-3 py-2 border border-gray-300 rounded-lg text-sm"
+              />
+              <input
+                type="date"
+                placeholder="To date"
+                value={dateTo}
+                onChange={(e) => setDateTo(e.target.value)}
+                className="px-3 py-2 border border-gray-300 rounded-lg text-sm"
+              />
+              <button
+                onClick={searchTransactions}
+                className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 text-sm"
+              >
+                🔍 Search
+              </button>
+              <button
+                onClick={clearFilters}
+                className="px-4 py-2 bg-gray-200 text-gray-700 rounded-lg hover:bg-gray-300 text-sm"
+              >
+                Clear
+              </button>
             </div>
             
-            {transactions.length === 0 ? (
-              <p className="text-gray-500 text-center py-12">
-                {searchTerm || statusFilter || dateFrom || dateTo || minAmount || maxAmount 
-                  ? 'No transactions match your search criteria.'
-                  : 'No transactions yet. Upload and process invoices to see them here.'}
-              </p>
-            ) : (
-              <>
-                <div className="mb-4 text-sm text-gray-600">
-                  Showing {transactions.length} of {transactionTotal} transactions
-                </div>
-                <div className="overflow-x-auto">
-                  <table className="w-full">
-                    <thead>
-                      <tr className="border-b">
-                        <th className="text-left py-3 px-2">Date</th>
-                        <th className="text-left py-3 px-2">Vendor</th>
-                        <th className="text-left py-3 px-2">Invoice #</th>
-                        <th className="text-left py-3 px-2">Amount</th>
-                        <th className="text-left py-3 px-2">Status</th>
-                        <th className="text-left py-3 px-2">Zoho Bill ID</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {transactions.map(txn => (
-                        <tr key={txn.id} className="border-b hover:bg-gray-50">
-                          <td className="py-3 px-2 text-sm">
-                            {new Date(txn.processed_at).toLocaleDateString()} <br/>
-                            <span className="text-xs text-gray-500">
-                              {new Date(txn.processed_at).toLocaleTimeString()}
-                            </span>
-                          </td>
-                          <td className="py-3 px-2 text-sm font-medium">{txn.vendor_name}</td>
-                          <td className="py-3 px-2 text-sm">{txn.invoice_number}</td>
-                          <td className="py-3 px-2 text-sm">
-                            ${parseFloat(txn.total_amount).toFixed(2)} {txn.currency}
-                          </td>
-                          <td className="py-3 px-2">
-                            <span className={`inline-block px-2 py-1 text-xs rounded ${
-                              txn.status === 'success' ? 'bg-green-100 text-green-800' : 'bg-red-100 text-red-800'
-                            }`}>
-                              {txn.status === 'success' ? '✓ Success' : '✗ Failed'}
-                            </span>
-                            {txn.error_message && (
-                              <p className="text-xs text-red-600 mt-1">{txn.error_message}</p>
-                            )}
-                          </td>
-                          <td className="py-3 px-2 text-sm">
-                            {txn.zoho_bill_id ? (
-                              <a
-                                href={`https://books.zoho.com/app#/bills/${txn.zoho_bill_id}`}
-                                target="_blank"
-                                rel="noopener noreferrer"
-                                className="text-blue-600 hover:text-blue-800 underline"
-                              >
-                                {txn.zoho_bill_id}
-                              </a>
-                            ) : (
-                              <span className="text-gray-400">-</span>
-                            )}
-                          </td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                </div>
-                
-                {transactions.length < transactionTotal && (
-                  <div className="mt-6 text-center">
-                    <button
-                      onClick={loadMoreTransactions}
-                      className="px-6 py-2 bg-gray-200 text-gray-700 rounded-lg hover:bg-gray-300 transition"
-                    >
-                      Load More ({transactionTotal - transactions.length} remaining)
-                    </button>
-                  </div>
-                )}
-              </>
+            {/* Transaction Table */}
+            <div className="overflow-x-auto">
+              <table className="w-full text-sm">
+                <thead className="bg-gray-100">
+                  <tr>
+                    <th className="px-4 py-3 text-left">Date</th>
+                    <th className="px-4 py-3 text-left">Vendor</th>
+                    <th className="px-4 py-3 text-left">Invoice #</th>
+                    <th className="px-4 py-3 text-right">Amount</th>
+                    <th className="px-4 py-3 text-center">Status</th>
+                    <th className="px-4 py-3 text-left">Zoho Bill ID</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {transactions.map(txn => (
+                    <tr key={txn.id} className="border-b hover:bg-gray-50">
+                      <td className="px-4 py-3">
+                        {new Date(txn.processed_at).toLocaleDateString()}
+                      </td>
+                      <td className="px-4 py-3 font-medium">{txn.vendor_name}</td>
+                      <td className="px-4 py-3">{txn.invoice_number}</td>
+                      <td className="px-4 py-3 text-right">
+                        ${parseFloat(txn.total_amount).toFixed(2)} {txn.currency}
+                      </td>
+                      <td className="px-4 py-3 text-center">
+                        <span className={`px-2 py-1 rounded text-xs ${
+                          txn.status === 'success' 
+                            ? 'bg-green-100 text-green-800' 
+                            : 'bg-red-100 text-red-800'
+                        }`}>
+                          {txn.status}
+                        </span>
+                      </td>
+                      <td className="px-4 py-3 text-gray-500 text-xs">
+                        {txn.zoho_bill_id || '-'}
+                      </td>
+                    </tr>
+                  ))}
+                  {transactions.length === 0 && (
+                    <tr>
+                      <td colSpan="6" className="px-4 py-8 text-center text-gray-500">
+                        No transactions found
+                      </td>
+                    </tr>
+                  )}
+                </tbody>
+              </table>
+            </div>
+            
+            {/* Load More */}
+            {transactions.length < transactionTotal && (
+              <div className="mt-4 text-center">
+                <button
+                  onClick={loadMoreTransactions}
+                  className="px-6 py-2 bg-gray-200 text-gray-700 rounded-lg hover:bg-gray-300"
+                >
+                  Load More ({transactions.length} of {transactionTotal})
+                </button>
+              </div>
             )}
           </div>
         )}
 
         {/* Batch Confirmation Modal */}
         {showBatchConfirm && (
-          <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center p-4 z-50">
-            <div className="bg-white rounded-lg shadow-2xl max-w-4xl w-full max-h-[90vh] overflow-y-auto">
-              <div className="p-6">
-                <div className="flex justify-between items-center mb-6">
-                  <h2 className="text-2xl font-bold">Confirm Batch Upload</h2>
-                  <button
-                    onClick={() => setShowBatchConfirm(false)}
-                    className="text-gray-500 hover:text-gray-700 text-2xl"
-                  >
-                    ×
-                  </button>
-                </div>
-
-                <p className="text-gray-600 mb-4">
-                  You are about to upload <strong>{batchToUpload.length}</strong> invoice(s) to Zoho Books:
-                </p>
-
-                <div className="space-y-3 mb-6 max-h-96 overflow-y-auto">
-                  {batchToUpload.map((file, index) => (
-                    <div 
-                      key={file.id} 
-                      className={`p-4 rounded-lg border ${
-                        file.isDuplicate ? 'bg-yellow-50 border-yellow-400' : 'bg-gray-50 border-gray-200'
-                      }`}
-                    >
-                      <div className="flex justify-between items-start">
-                        <div className="flex-1">
-                          <p className="font-semibold">#{index + 1}: {file.extractedData.vendorName}</p>
-                          <p className="text-sm text-gray-600">
-                            Invoice: {file.extractedData.invoiceNumber} | 
-                            Date: {file.extractedData.invoiceDate} | 
-                            Amount: ${file.extractedData.total?.toFixed(2)} {file.extractedData.currency}
-                          </p>
-                          <p className="text-xs text-gray-500 mt-1">
-                            {file.extractedData.lineItems?.length || 0} line items
-                          </p>
-                          {file.isDuplicate && (
-                            <p className="text-xs text-yellow-700 font-bold mt-1">
-                              ⚠️ WARNING: Possible duplicate - already uploaded on {new Date(file.duplicateInfo.processed_at).toLocaleDateString()}
-                            </p>
-                          )}
-                        </div>
-                        <button
-                          onClick={() => setBatchToUpload(prev => prev.filter(f => f.id !== file.id))}
-                          className="text-red-600 hover:text-red-800 ml-4"
-                          title="Remove from batch"
-                        >
-                          Remove
-                        </button>
-                      </div>
-                    </div>
-                  ))}
-                </div>
-
-                <div className="flex justify-end gap-3">
-                  <button
-                    onClick={() => setShowBatchConfirm(false)}
-                    className="px-6 py-2 border border-gray-300 rounded-lg hover:bg-gray-50 transition"
-                  >
-                    Cancel
-                  </button>
-                  <button
-                    onClick={uploadBatch}
-                    disabled={batchToUpload.length === 0}
-                    className="px-6 py-2 bg-emerald-600 text-white rounded-lg hover:bg-emerald-700 transition disabled:bg-gray-300"
-                  >
-                    Upload {batchToUpload.length} Invoice{batchToUpload.length !== 1 ? 's' : ''} to Zoho Books
-                  </button>
-                </div>
+          <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
+            <div className="bg-white rounded-lg shadow-xl p-6 max-w-lg w-full mx-4">
+              <h3 className="text-xl font-semibold mb-4">Confirm Batch Upload</h3>
+              <p className="text-gray-600 mb-4">
+                You are about to upload {batchToUpload.length} invoice(s) to Zoho Books:
+              </p>
+              <div className="max-h-60 overflow-y-auto mb-4 border rounded-lg">
+                {batchToUpload.map(file => (
+                  <div key={file.id} className="p-3 border-b last:border-b-0">
+                    <p className="font-medium">{file.extractedData?.vendorName}</p>
+                    <p className="text-sm text-gray-500">
+                      Invoice #{file.extractedData?.invoiceNumber} - ${file.extractedData?.total?.toFixed(2)}
+                    </p>
+                  </div>
+                ))}
+              </div>
+              <div className="flex justify-end gap-3">
+                <button
+                  onClick={() => setShowBatchConfirm(false)}
+                  className="px-6 py-2 border border-gray-300 rounded-lg hover:bg-gray-50"
+                >
+                  Cancel
+                </button>
+                <button
+                  onClick={uploadBatch}
+                  className="px-6 py-2 bg-emerald-600 text-white rounded-lg hover:bg-emerald-700"
+                >
+                  Upload All
+                </button>
               </div>
             </div>
           </div>
@@ -1776,11 +1354,11 @@ function InvoiceProcessor() {
 
         {/* Preview/Edit Modal */}
         {currentPreview && editMode && (
-          <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center p-4 z-50">
-            <div className="bg-white rounded-lg shadow-2xl max-w-4xl w-full max-h-[90vh] overflow-y-auto">
+          <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-4">
+            <div className="bg-white rounded-lg shadow-xl max-w-4xl w-full max-h-[90vh] overflow-y-auto">
               <div className="p-6">
-                <div className="flex justify-between items-center mb-6">
-                  <h2 className="text-2xl font-bold">Review & Edit Invoice Data</h2>
+                <div className="flex justify-between items-center mb-4">
+                  <h3 className="text-xl font-semibold">Review & Edit Invoice Data</h3>
                   <button
                     onClick={() => { setCurrentPreview(null); setEditMode(false); }}
                     className="text-gray-500 hover:text-gray-700 text-2xl"
@@ -1790,18 +1368,15 @@ function InvoiceProcessor() {
                 </div>
 
                 {currentPreview.isDuplicate && (
-                  <div className="mb-4 p-4 bg-yellow-50 border-l-4 border-yellow-400 rounded">
-                    <p className="font-bold text-yellow-800">⚠️ Possible Duplicate Detected</p>
-                    <p className="text-sm text-yellow-700 mt-1">
-                      This invoice matches one already uploaded on {new Date(currentPreview.duplicateInfo.processed_at).toLocaleDateString()} 
-                      (Vendor: {currentPreview.duplicateInfo.vendor_name}, Invoice: {currentPreview.duplicateInfo.invoice_number}, 
-                      Amount: ${parseFloat(currentPreview.duplicateInfo.total_amount).toFixed(2)})
+                  <div className="mb-4 p-3 bg-yellow-50 border border-yellow-200 rounded-lg">
+                    <p className="text-yellow-800 text-sm">
+                      ⚠️ <strong>Possible Duplicate:</strong> This invoice may have already been uploaded on {new Date(currentPreview.duplicateInfo?.processed_at).toLocaleDateString()}.
                     </p>
                   </div>
                 )}
 
                 <div className="space-y-4">
-                  {/* Vendor Info */}
+                  {/* Basic Info */}
                   <div className="grid grid-cols-2 gap-4">
                     <div>
                       <label className="block text-sm font-medium text-gray-700 mb-1">
@@ -1827,7 +1402,6 @@ function InvoiceProcessor() {
                     </div>
                   </div>
 
-                  {/* Dates */}
                   <div className="grid grid-cols-3 gap-4">
                     <div>
                       <label className="block text-sm font-medium text-gray-700 mb-1">
@@ -1846,7 +1420,7 @@ function InvoiceProcessor() {
                       </label>
                       <input
                         type="date"
-                        value={currentPreview.extractedData.dueDate || currentPreview.extractedData.invoiceDate || ''}
+                        value={currentPreview.extractedData.dueDate || ''}
                         onChange={(e) => updateExtractedData('dueDate', e.target.value)}
                         className="w-full px-3 py-2 border border-gray-300 rounded-lg"
                       />
@@ -1855,16 +1429,17 @@ function InvoiceProcessor() {
                       <label className="block text-sm font-medium text-gray-700 mb-1">
                         Currency
                       </label>
-                      <input
-                        type="text"
+                      <select
                         value={currentPreview.extractedData.currency || 'CAD'}
                         onChange={(e) => updateExtractedData('currency', e.target.value)}
                         className="w-full px-3 py-2 border border-gray-300 rounded-lg"
-                      />
+                      >
+                        <option value="CAD">CAD</option>
+                        <option value="USD">USD</option>
+                      </select>
                     </div>
                   </div>
 
-                  {/* Reference Number */}
                   <div>
                     <label className="block text-sm font-medium text-gray-700 mb-1">
                       Reference/PO Number
@@ -1881,101 +1456,98 @@ function InvoiceProcessor() {
                   {/* Line Items */}
                   <div>
                     <label className="block text-sm font-medium text-gray-700 mb-2">
-                      Line Items {accounts && accounts.length > 0 && `(${accounts.length} accounts loaded)`}
+                      Line Items
                     </label>
                     <div className="space-y-3">
-                      {currentPreview.extractedData.lineItems?.map((item, index) => (
-                        <div key={index} className="p-3 bg-gray-50 rounded-lg space-y-2">
-                          <div className="grid grid-cols-4 gap-2">
+                      {(currentPreview.extractedData.lineItems || []).map((item, index) => (
+                        <div key={index} className="p-3 border border-gray-200 rounded-lg bg-gray-50">
+                          <div className="grid grid-cols-3 gap-2 mb-2">
                             <input
                               type="text"
                               value={item.description || ''}
                               onChange={(e) => updateLineItem(index, 'description', e.target.value)}
-                              className="col-span-2 px-2 py-1 border border-gray-300 rounded text-sm"
                               placeholder="Description"
+                              className="col-span-1 px-2 py-1 border border-gray-300 rounded text-sm"
                             />
                             <input
                               type="number"
-                              step="0.01"
                               value={item.quantity || ''}
-                              onChange={(e) => updateLineItem(index, 'quantity', parseFloat(e.target.value))}
-                              className="px-2 py-1 border border-gray-300 rounded text-sm"
+                              onChange={(e) => updateLineItem(index, 'quantity', parseFloat(e.target.value) || 0)}
                               placeholder="Qty"
+                              className="px-2 py-1 border border-gray-300 rounded text-sm"
                             />
                             <input
                               type="number"
                               step="0.01"
                               value={item.rate || ''}
-                              onChange={(e) => updateLineItem(index, 'rate', parseFloat(e.target.value))}
-                              className="px-2 py-1 border border-gray-300 rounded text-sm"
+                              onChange={(e) => updateLineItem(index, 'rate', parseFloat(e.target.value) || 0)}
                               placeholder="Rate"
+                              className="px-2 py-1 border border-gray-300 rounded text-sm"
                             />
                           </div>
-                          <div>
-                            <div className="relative">
-                              <input
-                                type="text"
-                                placeholder="Search GL accounts..."
-                                value={item.account_search || ''}
-                                onChange={(e) => {
-                                  updateLineItem(index, 'account_search', e.target.value);
-                                  // Keep dropdown open while typing
-                                  if (!item.account_dropdown_open) {
-                                    updateLineItem(index, 'account_dropdown_open', true);
-                                  }
-                                }}
-                                onFocus={() => updateLineItem(index, 'account_dropdown_open', true)}
-                                onClick={() => updateLineItem(index, 'account_dropdown_open', true)}
-                                className={`w-full px-2 py-1 border rounded text-sm cursor-pointer ${
-                                  !item.account_id ? 'border-red-300 bg-red-50' : 'border-gray-300'
-                                }`}
-                              />
-                              {item.account_dropdown_open && (
-                                <>
-                                  <div 
-                                    className="fixed inset-0 z-40"
-                                    onClick={() => updateLineItem(index, 'account_dropdown_open', false)}
-                                  />
-                                  <div className="absolute z-50 w-full mt-1 bg-white border border-gray-300 rounded-lg shadow-xl max-h-60 overflow-y-auto">
-                                    {(accounts || [])
-                                      .filter(acc => {
-                                        const search = (item.account_search || '').toLowerCase();
-                                        return !search || 
-                                          acc.account_name.toLowerCase().includes(search) ||
-                                          acc.account_type.toLowerCase().includes(search);
-                                      })
-                                      .map(acc => (
-                                        <div
-                                          key={acc.account_id}
-                                          onClick={() => {
-                                            updateLineItem(index, 'account_id', acc.account_id);
-                                            updateLineItem(index, 'account_search', acc.account_name);
-                                            updateLineItem(index, 'account_dropdown_open', false);
-                                            if (acc.account_id) {
-                                              saveAccountMapping(item.description, acc.account_id, currentPreview.extractedData.vendorName);
-                                            }
-                                          }}
-                                          className="px-3 py-2 hover:bg-emerald-50 cursor-pointer text-sm border-b last:border-b-0"
-                                        >
-                                          <div className="font-medium">{acc.account_name}</div>
-                                          <div className="text-xs text-gray-500">{acc.account_type}</div>
-                                        </div>
-                                      ))
-                                    }
-                                    {(accounts || []).filter(acc => {
+                          <div className="relative">
+                            <input
+                              type="text"
+                              placeholder="Search GL accounts..."
+                              value={item.account_search || ''}
+                              onChange={(e) => {
+                                updateLineItem(index, 'account_search', e.target.value);
+                                // Keep dropdown open while typing
+                                if (!item.account_dropdown_open) {
+                                  updateLineItem(index, 'account_dropdown_open', true);
+                                }
+                              }}
+                              onFocus={() => updateLineItem(index, 'account_dropdown_open', true)}
+                              onClick={() => updateLineItem(index, 'account_dropdown_open', true)}
+                              className={`w-full px-2 py-1 border rounded text-sm cursor-pointer ${
+                                !item.account_id ? 'border-red-300 bg-red-50' : 'border-gray-300'
+                              }`}
+                            />
+                            {item.account_dropdown_open && (
+                              <>
+                                <div 
+                                  className="fixed inset-0 z-40"
+                                  onClick={() => updateLineItem(index, 'account_dropdown_open', false)}
+                                />
+                                <div className="absolute z-50 w-full mt-1 bg-white border border-gray-300 rounded-lg shadow-xl max-h-60 overflow-y-auto">
+                                  {(accounts || [])
+                                    .filter(acc => {
                                       const search = (item.account_search || '').toLowerCase();
                                       return !search || 
                                         acc.account_name.toLowerCase().includes(search) ||
                                         acc.account_type.toLowerCase().includes(search);
-                                    }).length === 0 && (
-                                      <div className="px-3 py-2 text-sm text-gray-500">
-                                        No accounts match "{item.account_search}"
+                                    })
+                                    .map(acc => (
+                                      <div
+                                        key={acc.account_id}
+                                        onClick={() => {
+                                          updateLineItem(index, 'account_id', acc.account_id);
+                                          updateLineItem(index, 'account_search', acc.account_name);
+                                          updateLineItem(index, 'account_dropdown_open', false);
+                                          if (acc.account_id) {
+                                            saveAccountMapping(item.description, acc.account_id, currentPreview.extractedData.vendorName);
+                                          }
+                                        }}
+                                        className="px-3 py-2 hover:bg-emerald-50 cursor-pointer text-sm border-b last:border-b-0"
+                                      >
+                                        <div className="font-medium">{acc.account_name}</div>
+                                        <div className="text-xs text-gray-500">{acc.account_type}</div>
                                       </div>
-                                    )}
-                                  </div>
-                                </>
-                              )}
-                            </div>
+                                    ))
+                                  }
+                                  {(accounts || []).filter(acc => {
+                                    const search = (item.account_search || '').toLowerCase();
+                                    return !search || 
+                                      acc.account_name.toLowerCase().includes(search) ||
+                                      acc.account_type.toLowerCase().includes(search);
+                                  }).length === 0 && (
+                                    <div className="px-3 py-2 text-sm text-gray-500">
+                                      No accounts match "{item.account_search}"
+                                    </div>
+                                  )}
+                                </div>
+                              </>
+                            )}
                           </div>
                         </div>
                       ))}
