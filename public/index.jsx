@@ -39,6 +39,17 @@ function InvoiceProcessor() {
   // Vendor confirmation state
   const [vendorConfirmation, setVendorConfirmation] = useState(null);
   const [pendingUpload, setPendingUpload] = useState(null);
+  const [vendorFormData, setVendorFormData] = useState({
+    vendorName: '',
+    email: '',
+    phone: '',
+    currency: 'CAD',
+    street: '',
+    city: '',
+    state: '',
+    zip: '',
+    country: ''
+  });
   
   // Transaction history filters
   const [searchTerm, setSearchTerm] = useState('');
@@ -323,13 +334,23 @@ function InvoiceProcessor() {
     if (!pendingUpload || !vendorConfirmation) return;
     
     try {
-      addToLog('info', `Creating new vendor: ${vendorConfirmation.vendorName}...`);
+      addToLog('info', `Creating new vendor: ${vendorFormData.vendorName}...`);
       
       const createResponse = await fetch('/api/zoho/vendor/create', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          vendorName: vendorConfirmation.vendorName
+          vendorName: vendorFormData.vendorName,
+          email: vendorFormData.email || null,
+          phone: vendorFormData.phone || null,
+          currency: vendorFormData.currency || 'CAD',
+          address: {
+            street: vendorFormData.street || null,
+            city: vendorFormData.city || null,
+            state: vendorFormData.state || null,
+            zip: vendorFormData.zip || null,
+            country: vendorFormData.country || null
+          }
         })
       });
 
@@ -341,8 +362,17 @@ function InvoiceProcessor() {
       const createResult = await createResponse.json();
       addToLog('success', `✓ Created new vendor: ${createResult.vendorName}`);
       
+      // Update the pending upload's vendor name in case it was edited
+      const updatedUpload = {
+        ...pendingUpload,
+        extractedData: {
+          ...pendingUpload.extractedData,
+          vendorName: vendorFormData.vendorName
+        }
+      };
+      
       // Now upload with the confirmed vendor ID
-      const result = await uploadToZoho(pendingUpload, createResult.vendorId);
+      const result = await uploadToZoho(updatedUpload, createResult.vendorId);
       
       if (!result.pending) {
         // Success - update file status
@@ -364,6 +394,17 @@ function InvoiceProcessor() {
     } finally {
       setVendorConfirmation(null);
       setPendingUpload(null);
+      setVendorFormData({
+        vendorName: '',
+        email: '',
+        phone: '',
+        currency: 'CAD',
+        street: '',
+        city: '',
+        state: '',
+        zip: '',
+        country: ''
+      });
     }
   };
 
@@ -378,16 +419,25 @@ function InvoiceProcessor() {
     }
     setVendorConfirmation(null);
     setPendingUpload(null);
+    setVendorFormData({
+      vendorName: '',
+      email: '',
+      phone: '',
+      currency: 'CAD',
+      street: '',
+      city: '',
+      state: '',
+      zip: '',
+      country: ''
+    });
   };
 
   const handleUpdateVendorName = (newName) => {
-    setVendorConfirmation(prev => ({ ...prev, vendorName: newName }));
-    if (pendingUpload) {
-      setPendingUpload(prev => ({
-        ...prev,
-        extractedData: { ...prev.extractedData, vendorName: newName }
-      }));
-    }
+    setVendorFormData(prev => ({ ...prev, vendorName: newName }));
+  };
+
+  const handleVendorFormChange = (field, value) => {
+    setVendorFormData(prev => ({ ...prev, [field]: value }));
   };
 
   // Auto-suggest account based on line item description and vendor
@@ -681,10 +731,22 @@ function InvoiceProcessor() {
           // Vendor not found - ask user for confirmation
           addToLog('warning', `⚠ Vendor "${data.vendorName}" not found in Zoho Books`);
           
+          // Pre-populate vendor form with extracted data
+          setVendorFormData({
+            vendorName: data.vendorName || '',
+            email: data.vendorEmail || '',
+            phone: data.vendorPhone || '',
+            currency: data.currency || 'CAD',
+            street: data.vendorAddress?.street || '',
+            city: data.vendorAddress?.city || '',
+            state: data.vendorAddress?.state || '',
+            zip: data.vendorAddress?.zip || '',
+            country: data.vendorAddress?.country || ''
+          });
+          
           // Store pending upload and show confirmation dialog
           setPendingUpload(fileObj);
           setVendorConfirmation({
-            vendorName: data.vendorName,
             invoiceNumber: data.invoiceNumber,
             action: 'create_new'
           });
@@ -1751,40 +1813,148 @@ function InvoiceProcessor() {
         {/* Vendor Confirmation Modal */}
         {vendorConfirmation && (
           <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-4">
-            <div className="bg-white rounded-lg shadow-xl max-w-md w-full">
+            <div className="bg-white rounded-lg shadow-xl max-w-2xl w-full max-h-[90vh] overflow-y-auto">
               <div className="p-6">
                 <div className="flex items-center mb-4">
                   <div className="w-12 h-12 bg-yellow-100 rounded-full flex items-center justify-center mr-4">
                     <span className="text-2xl">⚠️</span>
                   </div>
                   <div>
-                    <h3 className="text-lg font-semibold text-gray-900">Vendor Not Found</h3>
+                    <h3 className="text-lg font-semibold text-gray-900">Create New Vendor</h3>
                     <p className="text-sm text-gray-500">Invoice #{vendorConfirmation.invoiceNumber}</p>
                   </div>
                 </div>
 
-                <div className="mb-4 p-4 bg-gray-50 rounded-lg">
-                  <p className="text-sm text-gray-600 mb-2">
-                    The vendor below was not found in Zoho Books. Would you like to create it?
+                <div className="mb-4 p-3 bg-blue-50 rounded-lg">
+                  <p className="text-sm text-blue-700">
+                    💡 This vendor was not found in Zoho Books. Review the details below and click "Create Vendor & Upload" to add them.
                   </p>
-                  <div className="mt-3">
+                </div>
+
+                <div className="space-y-4">
+                  {/* Company Name */}
+                  <div>
                     <label className="block text-sm font-medium text-gray-700 mb-1">
-                      Vendor Name
+                      Company Name <span className="text-red-500">*</span>
                     </label>
                     <input
                       type="text"
-                      value={vendorConfirmation.vendorName}
-                      onChange={(e) => handleUpdateVendorName(e.target.value)}
+                      value={vendorFormData.vendorName}
+                      onChange={(e) => handleVendorFormChange('vendorName', e.target.value)}
                       className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-emerald-500 focus:border-emerald-500"
-                      placeholder="Enter vendor name"
+                      placeholder="Enter company name"
                     />
-                    <p className="text-xs text-gray-500 mt-1">
-                      You can edit the name before creating the vendor
-                    </p>
+                  </div>
+
+                  {/* Email and Phone */}
+                  <div className="grid grid-cols-2 gap-4">
+                    <div>
+                      <label className="block text-sm font-medium text-gray-700 mb-1">
+                        Email Address
+                      </label>
+                      <input
+                        type="email"
+                        value={vendorFormData.email}
+                        onChange={(e) => handleVendorFormChange('email', e.target.value)}
+                        className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-emerald-500 focus:border-emerald-500"
+                        placeholder="vendor@example.com"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-sm font-medium text-gray-700 mb-1">
+                        Phone
+                      </label>
+                      <input
+                        type="text"
+                        value={vendorFormData.phone}
+                        onChange={(e) => handleVendorFormChange('phone', e.target.value)}
+                        className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-emerald-500 focus:border-emerald-500"
+                        placeholder="+1 555-555-5555"
+                      />
+                    </div>
+                  </div>
+
+                  {/* Currency */}
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-1">
+                      Currency
+                    </label>
+                    <select
+                      value={vendorFormData.currency}
+                      onChange={(e) => handleVendorFormChange('currency', e.target.value)}
+                      className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-emerald-500 focus:border-emerald-500"
+                    >
+                      <option value="CAD">CAD - Canadian Dollar</option>
+                      <option value="USD">USD - US Dollar</option>
+                    </select>
+                  </div>
+
+                  {/* Address Section */}
+                  <div className="border-t pt-4">
+                    <h4 className="text-sm font-medium text-gray-700 mb-3">Address (Optional)</h4>
+                    
+                    <div className="space-y-3">
+                      <div>
+                        <label className="block text-xs text-gray-500 mb-1">Street Address</label>
+                        <input
+                          type="text"
+                          value={vendorFormData.street}
+                          onChange={(e) => handleVendorFormChange('street', e.target.value)}
+                          className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-emerald-500 focus:border-emerald-500"
+                          placeholder="123 Main St"
+                        />
+                      </div>
+                      
+                      <div className="grid grid-cols-2 gap-3">
+                        <div>
+                          <label className="block text-xs text-gray-500 mb-1">City</label>
+                          <input
+                            type="text"
+                            value={vendorFormData.city}
+                            onChange={(e) => handleVendorFormChange('city', e.target.value)}
+                            className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-emerald-500 focus:border-emerald-500"
+                            placeholder="City"
+                          />
+                        </div>
+                        <div>
+                          <label className="block text-xs text-gray-500 mb-1">State/Province</label>
+                          <input
+                            type="text"
+                            value={vendorFormData.state}
+                            onChange={(e) => handleVendorFormChange('state', e.target.value)}
+                            className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-emerald-500 focus:border-emerald-500"
+                            placeholder="State/Province"
+                          />
+                        </div>
+                      </div>
+                      
+                      <div className="grid grid-cols-2 gap-3">
+                        <div>
+                          <label className="block text-xs text-gray-500 mb-1">Postal/ZIP Code</label>
+                          <input
+                            type="text"
+                            value={vendorFormData.zip}
+                            onChange={(e) => handleVendorFormChange('zip', e.target.value)}
+                            className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-emerald-500 focus:border-emerald-500"
+                            placeholder="A1A 1A1"
+                          />
+                        </div>
+                        <div>
+                          <label className="block text-xs text-gray-500 mb-1">Country</label>
+                          <input
+                            type="text"
+                            value={vendorFormData.country}
+                            onChange={(e) => handleVendorFormChange('country', e.target.value)}
+                            className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-emerald-500 focus:border-emerald-500"
+                            placeholder="Canada"
+                          />
+                        </div>
+                      </div>
+                    </div>
                   </div>
                 </div>
 
-                <div className="flex gap-3">
+                <div className="flex gap-3 mt-6">
                   <button
                     onClick={handleCancelVendorCreation}
                     className="flex-1 px-4 py-2 border border-gray-300 text-gray-700 rounded-lg hover:bg-gray-50 transition-colors"
@@ -1793,7 +1963,8 @@ function InvoiceProcessor() {
                   </button>
                   <button
                     onClick={handleCreateVendorAndUpload}
-                    className="flex-1 px-4 py-2 bg-emerald-600 text-white rounded-lg hover:bg-emerald-700 transition-colors"
+                    disabled={!vendorFormData.vendorName.trim()}
+                    className="flex-1 px-4 py-2 bg-emerald-600 text-white rounded-lg hover:bg-emerald-700 transition-colors disabled:bg-gray-300 disabled:cursor-not-allowed"
                   >
                     Create Vendor & Upload
                   </button>
