@@ -1,6 +1,3 @@
-import React, { useState, useEffect } from 'react';
-import { createRoot } from 'react-dom/client';
-
 // Activity Log Component
 function ActivityLog({ activities, onClear }) {
     return (
@@ -31,7 +28,7 @@ function ActivityLog({ activities, onClear }) {
 
 // Main App Component
 function InvoiceProcessor() {
-    const [config, setConfig] = useState({
+    const [config, setConfig] = React.useState({
         apiDomain: '',
         organizationId: '',
         accessToken: '',
@@ -39,10 +36,10 @@ function InvoiceProcessor() {
         clientId: '',
         clientSecret: ''
     });
-    const [showSettings, setShowSettings] = useState(false);
-    const [activities, setActivities] = useState([]);
-    const [glAccounts, setGlAccounts] = useState([]);
-    const [accountMappings, setAccountMappings] = useState({});
+    const [showSettings, setShowSettings] = React.useState(false);
+    const [activities, setActivities] = React.useState([]);
+    const [glAccounts, setGlAccounts] = React.useState([]);
+    const [accountMappings, setAccountMappings] = React.useState({});
 
     const addActivity = (message, type = 'info') => {
         const time = new Date().toLocaleTimeString();
@@ -54,7 +51,7 @@ function InvoiceProcessor() {
     };
 
     // Load configuration on mount
-    useEffect(() => {
+    React.useEffect(() => {
         loadConfig();
         loadMappings();
     }, []);
@@ -154,7 +151,6 @@ function InvoiceProcessor() {
                 
                 if (result.content) {
                     addActivity(`✓ Processed ${file.name}`, 'success');
-                    // Here you would display the extracted data to the user
                     console.log('Extracted data:', result);
                 } else if (result.error) {
                     addActivity(`Error processing ${file.name}: ${result.error.message}`, 'error');
@@ -206,82 +202,38 @@ function InvoiceProcessor() {
             {showSettings && (
                 <div style={{ backgroundColor: 'white', padding: '20px', borderRadius: '8px', marginBottom: '20px', boxShadow: '0 2px 4px rgba(0,0,0,0.1)' }}>
                     <h2>Zoho Books Configuration</h2>
+                    <p style={{ color: '#666', marginBottom: '20px' }}>
+                        Note: Configuration is now managed via Railway environment variables. Changes here will not be saved.
+                    </p>
                     <div style={{ display: 'grid', gap: '15px' }}>
                         <div>
                             <label>API Domain</label>
                             <input
                                 type="text"
                                 value={config.apiDomain}
-                                onChange={(e) => setConfig({...config, apiDomain: e.target.value})}
-                                placeholder="https://www.zohoapis.com"
-                                style={{ width: '100%', padding: '8px', marginTop: '5px' }}
+                                disabled
+                                style={{ width: '100%', padding: '8px', marginTop: '5px', backgroundColor: '#f5f5f5' }}
                             />
-                            <small style={{ color: '#666' }}>US/Global: https://www.zohoapis.com | Europe: https://www.zohoapis.eu</small>
                         </div>
                         <div>
                             <label>Organization ID</label>
                             <input
                                 type="text"
                                 value={config.organizationId}
-                                onChange={(e) => setConfig({...config, organizationId: e.target.value})}
-                                placeholder="Enter your Zoho Organization ID"
-                                style={{ width: '100%', padding: '8px', marginTop: '5px' }}
+                                disabled
+                                style={{ width: '100%', padding: '8px', marginTop: '5px', backgroundColor: '#f5f5f5' }}
                             />
                         </div>
                         <div>
                             <label>Access Token</label>
                             <input
-                                type="text"
-                                value={config.accessToken}
-                                onChange={(e) => setConfig({...config, accessToken: e.target.value})}
-                                placeholder="Enter your Zoho Access Token"
-                                style={{ width: '100%', padding: '8px', marginTop: '5px' }}
-                            />
-                        </div>
-                        <div>
-                            <label>Refresh Token</label>
-                            <input
-                                type="text"
-                                value={config.refreshToken}
-                                onChange={(e) => setConfig({...config, refreshToken: e.target.value})}
-                                placeholder="1000.xxx..."
-                                style={{ width: '100%', padding: '8px', marginTop: '5px' }}
-                            />
-                        </div>
-                        <div>
-                            <label>Client ID</label>
-                            <input
-                                type="text"
-                                value={config.clientId}
-                                onChange={(e) => setConfig({...config, clientId: e.target.value})}
-                                placeholder="1000.XXXXXXXXXXXXX"
-                                style={{ width: '100%', padding: '8px', marginTop: '5px' }}
-                            />
-                        </div>
-                        <div>
-                            <label>Client Secret</label>
-                            <input
                                 type="password"
-                                value={config.clientSecret}
-                                onChange={(e) => setConfig({...config, clientSecret: e.target.value})}
-                                placeholder="Enter Client Secret"
-                                style={{ width: '100%', padding: '8px', marginTop: '5px' }}
+                                value={config.accessToken ? '••••••••••••' : ''}
+                                disabled
+                                style={{ width: '100%', padding: '8px', marginTop: '5px', backgroundColor: '#f5f5f5' }}
                             />
                         </div>
-                        <div style={{ display: 'flex', gap: '10px' }}>
-                            <button 
-                                onClick={saveConfig}
-                                style={{ 
-                                    padding: '10px 30px', 
-                                    backgroundColor: '#4CAF50', 
-                                    color: 'white',
-                                    border: 'none',
-                                    borderRadius: '5px',
-                                    cursor: 'pointer'
-                                }}
-                            >
-                                Save Settings
-                            </button>
+                        <div>
                             <button 
                                 onClick={loadGLAccounts}
                                 style={{ 
@@ -347,5 +299,5 @@ function InvoiceProcessor() {
 }
 
 // Mount the app
-const root = createRoot(document.getElementById('root'));
+const root = ReactDOM.createRoot(document.getElementById('root'));
 root.render(<InvoiceProcessor />);
