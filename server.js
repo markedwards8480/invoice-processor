@@ -150,3 +150,131 @@ app.get('/api/mappings', async (req, res) => {
 // Save account mapping
 app.post('/api/mappings', async (req, res) => {
     try {
+        console.log('POST /api/mappings - Saving mapping');
+        const { keyword, account_id, account_name } = req.body;
+        const client = await pool.connect();
+        
+        await client.query(
+            `INSERT INTO account_mappings (keyword, account_id, account_name)
+             VALUES ($1, $2, $3)
+             ON CONFLICT (keyword)
+             DO UPDATE SET account_id = $2, account_name = $3`,
+            [keyword, account_id, account_name]
+        );
+        
+        client.release();
+        console.log('Mapping saved:', keyword);
+        res.json({ success: true });
+    } catch (err) {
+        console.error('Error saving mapping:', err);
+        res.status(500).json({ error: err.message });
+    }
+});
+
+// Process invoice with Claude
+app.post('/api/process-invoice', upload.single('file'), async (req, res) => {
+    try {
+        console.log('Processing invoice:', req.file?.originalname);
+        const pdfBuffer = req.file.buffer;
+        const base64Pdf = pdfBuffer.toString('base64');
+        
+        const { glAccounts, mappings } = req.body;
+        
+        // Use API key from environment
+        const apiKey = process.env.ANTHROPIC_API_KEY;
+        
+        if (!apiKey) {
+            throw new Error('ANTHROPIC_API_KEY not configured in environment variables');
+        }
+        
+        const prompt = `Extract all line items from this invoice. For each line item, provide:
+1. Description
+2. Amount
+3. Suggested GL account (choose from the provided list)
+4. Your reasoning
+
+Available GL Accounts:
+${glAccounts}
+
+Known mappings (use these when keywords match):
+${mappings}
+
+Format your response as JSON array of objects with: description, amount, suggestedAccount, accountId, reasoning`;
+
+        const response = await fetch('https://api.anthropic.com/v1/messages', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'x-api-key': apiKey,
+                'anthropic-version': '2023-06-01'
+            },
+            body: JSON.stringify({
+                model: 'claude-sonnet-4-20250514',
+                max_tokens: 4000,
+                messages: [{
+                    role: 'user',
+                    content: [{
+                        type: 'document',
+                        source: {
+                            type: 'base64',
+                            media_type: 'application/pdf',
+                            data: base64Pdf
+                        }
+                    }, {
+                        type: 'text',
+                        text: prompt
+                    }]
+                }]
+            })
+        });
+
+        const data = await response.json();
+        console.log('Claude response received');
+        res.json(data);
+    } catch (err) {
+        console.error('Error processing invoice:', err);
+        res.status(500).json({ error: err.message });
+    }
+});
+
+// Upload to Zoho Books
+app.post('/api/upload-to-zoho', async (req, res) => {
+    try {
+        console.log('Uploading to Zoho Books...');
+        const { invoiceData, pdfFile } = req.body;
+        
+        // Use credentials from environment
+        const apiDomain = process.env.ZOHO_API_DOMAIN;
+        const organizationId = process.env.ZOHO_ORGANIZATION_ID;
+        const accessToken = process.env.ZOHO_ACCESS_TOKEN;
+        
+        if (!apiDomain || !organizationId || !accessToken) {
+            throw new Error('Missing Zoho configuration in environment variables');
+        }
+        
+        // Implementation for Zoho upload
+        // This would need the full invoice creation logic
+        
+        res.json({ success: true, message: 'Upload functionality to be implemented' });
+    } catch (err) {
+        console.error('Error uploading to Zoho:', err);
+        res.status(500).json({ error: err.message });
+    }
+});
+
+// Initialize database and start server
+const PORT = process.env.PORT || 3000;
+
+initDatabase()
+    .then(() => {
+        app.listen(PORT, '0.0.0.0', () => {
+            console.log(`✅ Server running on port ${PORT}`);
+            console.log(`📊 Database: ${process.env.DATABASE_URL ? 'Connected' : 'Not configured'}`);
+            console.log(`🔑 Zoho configured: ${process.env.ZOHO_API_DOMAIN ? 'Yes' : 'No'}`);
+            console.log(`🤖 Anthropic configured: ${process.env.ANTHROPIC_API_KEY ? 'Yes' : 'No'}`);
+        });
+    })
+    .catch(err => {
+        console.error('❌ Failed to start server:', err);
+        process.exit(1);
+    });
