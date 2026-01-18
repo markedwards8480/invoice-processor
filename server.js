@@ -864,6 +864,7 @@ app.post('/api/claude/extract', async (req, res) => {
   ],
   "subtotal": number,
   "tax": number,
+  "taxType": "none" or "gst" or "hst" or "gst_pst" or "gst_qst",
   "taxDetails": {
     "gst": number or 0,
     "hst": number or 0,
@@ -874,10 +875,16 @@ app.post('/api/claude/extract', async (req, res) => {
 }
 
 IMPORTANT for tax extraction:
-- Look for GST, HST, PST, QST, or any sales tax line items
+- Look for GST, HST, PST, QST, or any sales tax line items on the invoice
+- "taxType" MUST be set based on what taxes appear on the invoice:
+  - "gst" if only GST (5%) is shown
+  - "hst" if HST (13-15%) is shown
+  - "gst_pst" if both GST and PST are shown
+  - "gst_qst" if both GST and QST are shown
+  - "none" only if there is genuinely no tax on the invoice
 - taxDetails should break down each tax separately (GST=5%, HST=13-15%, PST=7-10%, QST=9.975%)
 - "tax" should be the total of all taxes combined
-- If no tax breakdown is visible, put the total tax in "tax" and set all taxDetails to 0`
+- If you see "GST" on the invoice, taxType MUST be "gst" and taxDetails.gst must have the amount`
             }
           ]
         }]
