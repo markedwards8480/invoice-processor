@@ -476,9 +476,9 @@ async function startWorkDriveMonitoring() {
   // Check immediately on start
   await checkWorkDriveFolder();
 
-  // Then check every 5 minutes (300000 ms)
-  workdriveMonitorInterval = setInterval(checkWorkDriveFolder, 5 * 60 * 1000);
-  console.log('WorkDrive monitoring started (checks every 5 minutes)');
+  // Then check every 2 minutes (120000 ms)
+  workdriveMonitorInterval = setInterval(checkWorkDriveFolder, 2 * 60 * 1000);
+  console.log('WorkDrive monitoring started (checks every 2 minutes)');
 }
 
 // Start WorkDrive monitoring after 10 seconds (allow database to initialize)
