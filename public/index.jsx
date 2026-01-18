@@ -36,6 +36,10 @@ function InvoiceProcessor() {
   const [isConnected, setIsConnected] = useState(false);
   const [loadingAccounts, setLoadingAccounts] = useState(false);
   
+  // Vendor confirmation state
+  const [vendorConfirmation, setVendorConfirmation] = useState(null);
+  const [pendingUpload, setPendingUpload] = useState(null);
+  
   // Transaction history filters
   const [searchTerm, setSearchTerm] = useState('');
   const [statusFilter, setStatusFilter] = useState('');
@@ -314,6 +318,78 @@ function InvoiceProcessor() {
     }
   };
 
+  // Vendor confirmation handlers
+  const handleCreateVendorAndUpload = async () => {
+    if (!pendingUpload || !vendorConfirmation) return;
+    
+    try {
+      addToLog('info', `Creating new vendor: ${vendorConfirmation.vendorName}...`);
+      
+      const createResponse = await fetch('/api/zoho/vendor/create', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          vendorName: vendorConfirmation.vendorName
+        })
+      });
+
+      if (!createResponse.ok) {
+        const errorText = await createResponse.text();
+        throw new Error(`Failed to create vendor: ${errorText}`);
+      }
+
+      const createResult = await createResponse.json();
+      addToLog('success', `✓ Created new vendor: ${createResult.vendorName}`);
+      
+      // Now upload with the confirmed vendor ID
+      const result = await uploadToZoho(pendingUpload, createResult.vendorId);
+      
+      if (!result.pending) {
+        // Success - update file status
+        setFiles(prev => prev.map(f => 
+          f.file.name === pendingUpload.file.name
+            ? { ...f, status: 'uploaded' }
+            : f
+        ));
+      }
+    } catch (error) {
+      console.error('Error creating vendor:', error);
+      addToLog('error', `Failed to create vendor: ${error.message}`);
+      
+      setFiles(prev => prev.map(f => 
+        f.file.name === pendingUpload.file.name
+          ? { ...f, status: 'failed', error: error.message }
+          : f
+      ));
+    } finally {
+      setVendorConfirmation(null);
+      setPendingUpload(null);
+    }
+  };
+
+  const handleCancelVendorCreation = () => {
+    if (pendingUpload) {
+      addToLog('info', `Cancelled upload for invoice - vendor not created`);
+      setFiles(prev => prev.map(f => 
+        f.file.name === pendingUpload.file.name
+          ? { ...f, status: 'pending_vendor', error: 'Vendor creation cancelled' }
+          : f
+      ));
+    }
+    setVendorConfirmation(null);
+    setPendingUpload(null);
+  };
+
+  const handleUpdateVendorName = (newName) => {
+    setVendorConfirmation(prev => ({ ...prev, vendorName: newName }));
+    if (pendingUpload) {
+      setPendingUpload(prev => ({
+        ...prev,
+        extractedData: { ...prev.extractedData, vendorName: newName }
+      }));
+    }
+  };
+
   // Auto-suggest account based on line item description and vendor
   const suggestAccount = (description, vendorName = '') => {
     const desc = description.toLowerCase();
@@ -568,7 +644,7 @@ function InvoiceProcessor() {
   };
 
   // Upload to Zoho Books
-  const uploadToZoho = async (fileObj) => {
+  const uploadToZoho = async (fileObj, confirmedVendorId = null) => {
     if (!fileObj.extractedData) {
       throw new Error('No data extracted');
     }
@@ -576,29 +652,51 @@ function InvoiceProcessor() {
     const data = fileObj.extractedData;
     
     try {
-      addToLog('info', `Searching for vendor: ${data.vendorName}...`);
+      let vendorId = confirmedVendorId;
       
-      // Server will use environment variables for credentials
-      const vendorResponse = await fetch('/api/zoho/vendor', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          vendorName: data.vendorName
-        })
-      });
+      // If no confirmed vendor ID, search for the vendor first
+      if (!vendorId) {
+        addToLog('info', `Searching for vendor: ${data.vendorName}...`);
+        
+        const searchResponse = await fetch('/api/zoho/vendor/search', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            vendorName: data.vendorName
+          })
+        });
 
-      if (!vendorResponse.ok) {
-        const errorText = await vendorResponse.text();
-        throw new Error(`Failed to find/create vendor: ${errorText}`);
+        if (!searchResponse.ok) {
+          const errorText = await searchResponse.text();
+          throw new Error(`Failed to search for vendor: ${errorText}`);
+        }
+
+        const searchResult = await searchResponse.json();
+        
+        if (searchResult.found) {
+          // Vendor found - use it
+          vendorId = searchResult.vendorId;
+          addToLog('success', `✓ Found existing vendor: ${searchResult.vendorName}`);
+        } else {
+          // Vendor not found - ask user for confirmation
+          addToLog('warning', `⚠ Vendor "${data.vendorName}" not found in Zoho Books`);
+          
+          // Store pending upload and show confirmation dialog
+          setPendingUpload(fileObj);
+          setVendorConfirmation({
+            vendorName: data.vendorName,
+            invoiceNumber: data.invoiceNumber,
+            action: 'create_new'
+          });
+          
+          return { pending: true, message: 'Waiting for vendor confirmation' };
+        }
       }
-
-      const vendorData = await vendorResponse.json();
-      addToLog('success', `✓ Vendor ready: ${data.vendorName}`);
-
+      
       addToLog('info', `Creating bill ${data.invoiceNumber}...`);
       
       const billData = {
-        vendor_id: vendorData.vendorId,
+        vendor_id: vendorId,
         bill_number: data.invoiceNumber,
         date: data.invoiceDate,
         due_date: data.dueDate || data.invoiceDate,
@@ -1135,6 +1233,9 @@ function InvoiceProcessor() {
                           {fileObj.status === 'success' && (
                             <span className="text-green-600 text-sm">✓ Uploaded</span>
                           )}
+                          {fileObj.status === 'pending_vendor' && (
+                            <span className="text-yellow-600 text-sm">⚠ Vendor needed</span>
+                          )}
                           {fileObj.status === 'error' && (
                             <span className="text-red-500 text-sm">✗ Failed</span>
                           )}
@@ -1640,6 +1741,61 @@ function InvoiceProcessor() {
                     className="px-6 py-2 bg-emerald-600 text-white rounded-lg hover:bg-emerald-700 transition disabled:bg-gray-300"
                   >
                     {processing ? 'Uploading...' : 'Confirm & Upload'}
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* Vendor Confirmation Modal */}
+        {vendorConfirmation && (
+          <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-4">
+            <div className="bg-white rounded-lg shadow-xl max-w-md w-full">
+              <div className="p-6">
+                <div className="flex items-center mb-4">
+                  <div className="w-12 h-12 bg-yellow-100 rounded-full flex items-center justify-center mr-4">
+                    <span className="text-2xl">⚠️</span>
+                  </div>
+                  <div>
+                    <h3 className="text-lg font-semibold text-gray-900">Vendor Not Found</h3>
+                    <p className="text-sm text-gray-500">Invoice #{vendorConfirmation.invoiceNumber}</p>
+                  </div>
+                </div>
+
+                <div className="mb-4 p-4 bg-gray-50 rounded-lg">
+                  <p className="text-sm text-gray-600 mb-2">
+                    The vendor below was not found in Zoho Books. Would you like to create it?
+                  </p>
+                  <div className="mt-3">
+                    <label className="block text-sm font-medium text-gray-700 mb-1">
+                      Vendor Name
+                    </label>
+                    <input
+                      type="text"
+                      value={vendorConfirmation.vendorName}
+                      onChange={(e) => handleUpdateVendorName(e.target.value)}
+                      className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-emerald-500 focus:border-emerald-500"
+                      placeholder="Enter vendor name"
+                    />
+                    <p className="text-xs text-gray-500 mt-1">
+                      You can edit the name before creating the vendor
+                    </p>
+                  </div>
+                </div>
+
+                <div className="flex gap-3">
+                  <button
+                    onClick={handleCancelVendorCreation}
+                    className="flex-1 px-4 py-2 border border-gray-300 text-gray-700 rounded-lg hover:bg-gray-50 transition-colors"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    onClick={handleCreateVendorAndUpload}
+                    className="flex-1 px-4 py-2 bg-emerald-600 text-white rounded-lg hover:bg-emerald-700 transition-colors"
+                  >
+                    Create Vendor & Upload
                   </button>
                 </div>
               </div>
