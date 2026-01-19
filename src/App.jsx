@@ -497,10 +497,20 @@ export default function App() {
   const costPerHourTrend = useMemo(() => {
     return filteredData.map(d => {
       const hours = d.flightHours?.total || 0;
-      const expenses = (d.fixedServices?.total || 0) + (d.variableOps?.total || 0) + (d.variableMaint?.total || 0);
+      const fixed = d.fixedServices?.total || 0;
+      const variable = d.variableOps?.total || 0;
+      const maintenance = d.variableMaint?.total || 0;
+      const total = fixed + variable + maintenance;
+      
       return {
         month: d.label,
-        costPerHour: hours > 0 ? expenses / hours : 0
+        hours: hours,
+        fixedPerHour: hours > 0 ? fixed / hours : 0,
+        variablePerHour: hours > 0 ? variable / hours : 0,
+        maintPerHour: hours > 0 ? maintenance / hours : 0,
+        totalPerHour: hours > 0 ? total / hours : 0,
+        // Flag low hour months
+        lowHours: hours < 10
       };
     });
   }, [filteredData]);
@@ -711,15 +721,49 @@ export default function App() {
                 </div>
 
                 <div className="chart-card">
-                  <h3><TrendingUp size={18} /> Cost Per Hour Trend</h3>
+                  <h3><TrendingUp size={18} /> Cost Per Hour Breakdown</h3>
                   <ResponsiveContainer width="100%" height={250}>
-                    <AreaChart data={costPerHourTrend}>
+                    <BarChart data={costPerHourTrend}>
                       <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.1)" />
                       <XAxis dataKey="month" stroke={colors.slate} fontSize={12} />
                       <YAxis stroke={colors.slate} fontSize={12} tickFormatter={formatCurrency} />
-                      <Tooltip content={<CustomTooltip />} />
-                      <Area type="monotone" dataKey="costPerHour" name="Cost/Hour" stroke={colors.purple} fill={`${colors.purple}40`} strokeWidth={2} />
-                    </AreaChart>
+                      <Tooltip content={({ active, payload, label }) => {
+                        if (active && payload && payload.length) {
+                          const data = payload[0]?.payload;
+                          return (
+                            <div style={{
+                              background: 'rgba(15, 23, 42, 0.95)',
+                              border: '1px solid rgba(255,255,255,0.1)',
+                              borderRadius: '8px',
+                              padding: '12px 16px',
+                              boxShadow: '0 4px 20px rgba(0,0,0,0.3)'
+                            }}>
+                              <p style={{ color: '#fff', fontWeight: 600, marginBottom: '8px' }}>{label}</p>
+                              <p style={{ color: colors.slate, fontSize: '12px', marginBottom: '8px' }}>
+                                {data?.hours?.toFixed(1)} flight hours {data?.lowHours && '(low)'}
+                              </p>
+                              <p style={{ color: colors.primary, fontSize: '13px', margin: '4px 0' }}>
+                                Fixed: {formatFullCurrency(data?.fixedPerHour || 0)}/hr
+                              </p>
+                              <p style={{ color: colors.secondary, fontSize: '13px', margin: '4px 0' }}>
+                                Variable: {formatFullCurrency(data?.variablePerHour || 0)}/hr
+                              </p>
+                              <p style={{ color: colors.accent, fontSize: '13px', margin: '4px 0' }}>
+                                Maintenance: {formatFullCurrency(data?.maintPerHour || 0)}/hr
+                              </p>
+                              <p style={{ color: '#fff', fontSize: '14px', fontWeight: 600, marginTop: '8px', borderTop: '1px solid rgba(255,255,255,0.1)', paddingTop: '8px' }}>
+                                Total: {formatFullCurrency(data?.totalPerHour || 0)}/hr
+                              </p>
+                            </div>
+                          );
+                        }
+                        return null;
+                      }} />
+                      <Legend />
+                      <Bar dataKey="fixedPerHour" name="Fixed/Hr" stackId="a" fill={colors.primary} />
+                      <Bar dataKey="variablePerHour" name="Variable/Hr" stackId="a" fill={colors.secondary} />
+                      <Bar dataKey="maintPerHour" name="Maint/Hr" stackId="a" fill={colors.accent} radius={[4, 4, 0, 0]} />
+                    </BarChart>
                   </ResponsiveContainer>
                 </div>
               </div>
